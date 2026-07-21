@@ -11,7 +11,7 @@ Ordered by leverage. Each slice is independently shippable and dogfooded before 
 - macOS Keychain backend, gitleaks self-scan clean
 - Dogfooded on a real 46-repo, multi-agent, VPS + Vercel fleet
 
-## v0.2 — `fan` (the copy-paste killer)
+## ✅ v0.2 — `fan` (the copy-paste killer, done Jul 2026)
 One paste → every place a key lives. Declare sites once (`fan site openrouter/API_KEY ~/CODE/x/.env OPENROUTER_API_KEY`), then `fan openrouter/API_KEY` writes the canonical value to all of them and backs up what it replaced. Kills the four-places-and-one-goes-stale bug at the root. Prototyped already.
 
 ## v0.3 — age backend (portability = other people can use it)

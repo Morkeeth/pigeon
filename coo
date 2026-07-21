@@ -269,12 +269,101 @@ cmd_setup() {
   print ""; c 244 "  run \`coo\` anytime to re-check, or \`coo fan <ref>\` to push a key everywhere it lives."
 }
 
+# ---- fan: one paste → every place a key lives -------------------------------
+# the copy-paste killer. declare where a key lives once, then `coo fan <ref>`
+# writes the canonical nest value to every declared .env, backing up what it
+# replaced. this is the fix for the bug that started pigeon: four copies, one
+# goes stale, an agent dies quiet. values are never printed — only fingerprints.
+cmd_site() {
+  local ref="${1:-}" target="${2:-}" var="${3:-}"   # never name a local `path` in zsh
+  [[ -n "$ref" && -n "$target" && -n "$var" ]] \
+    || die "usage: $SELF site <service/NAME> <file-path> <VAR_NAME>"
+  SITES_F="$SITES" REF="$ref" P="${target/#\~/$HOME}" V="$var" python3 - <<'PY'
+import json, os
+f = os.environ['SITES_F']; d = json.load(open(f))
+entry = {"path": os.environ['P'], "var": os.environ['V']}
+lst = d.setdefault(os.environ['REF'], [])
+if entry not in lst: lst.append(entry)
+json.dump(d, open(f, 'w'), indent=2)
+print(f"declared: {os.environ['REF']} → {os.environ['P']} ({os.environ['V']})")
+PY
+}
+
+cmd_fan() {
+  local ref="${1:-}"
+  [[ -n "$ref" ]] || die "usage: $SELF fan <service/NAME>   (declare sites first: $SELF site …)"
+  local can; can=$(kc_get "$ref") || die "no key stored for $ref — stash it first: $SELF stash $ref"
+
+  c cyan "🐦 fanning $ref ($(fp "$can")) to every declared site…"; print ""
+  local wrote=0 same=0 miss=0
+  # show the plan + drift, then write. python does the file edits atomically-ish
+  # (write to a temp, back up the original, move) and reports one line per site.
+  local report
+  report=$(SITES_F="$SITES" REF="$ref" CAN="$can" python3 - <<'PY'
+import json, os, shutil, hashlib, sys
+d = json.load(open(os.environ['SITES_F'])); ref = os.environ['REF']; can = os.environ['CAN']
+def fp(v): return hashlib.sha1(v.encode()).hexdigest()[:8]
+sites = d.get(ref, [])
+if not sites:
+    print("NOSITES"); sys.exit(0)
+w=s=m=0
+for site in sites:
+    p, var = site['path'], site['var']
+    try:
+        lines = open(p).readlines()
+    except OSError:
+        print(f"MISS\t{p}\t{var} (file unreadable)"); m+=1; continue
+    out, found, changed = [], False, False
+    for line in lines:
+        ls = line.strip(); bare = ls.replace('export ', '', 1)
+        if not ls.startswith('#') and bare.startswith(var + '='):
+            found = True
+            old = bare.split('=', 1)[1].strip().strip('"').strip("'")
+            if old == can:
+                out.append(line)
+            else:
+                pre = 'export ' if ls.startswith('export ') else ''
+                ind = line[:len(line)-len(line.lstrip())]
+                out.append(f'{ind}{pre}{var}={can}\n'); changed = True
+                print(f"WROTE\t{p}\t{fp(old)} → {fp(can)}")
+        else:
+            out.append(line)
+    if not found:
+        out.append(f'{var}={can}\n'); changed = True
+        print(f"WROTE\t{p}\t(added {var})")
+    if changed:
+        shutil.copy2(p, p + '.bak-pigeon')     # always reversible
+        open(p, 'w').writelines(out); w+=1
+    elif found:
+        print(f"SAME\t{p}\talready canonical"); s+=1
+print(f"TALLY\t{w}\t{s}\t{m}")
+PY
+)
+  if [[ "$report" == "NOSITES" ]]; then
+    c yellow "  no sites declared for $ref."
+    print "  declare one:  $SELF site $ref ~/CODE/yourproj/.env OPENROUTER_API_KEY"
+    return 0
+  fi
+  local kind a b extra
+  while IFS=$'\t' read -r kind a b extra; do
+    case "$kind" in
+      WROTE) c green  "  ✓ ${a/#$HOME/~}  $b" ;;
+      SAME)  c 244    "  · ${a/#$HOME/~}  $b" ;;
+      MISS)  c yellow "  ⚠ ${a/#$HOME/~}  $b" ;;
+      TALLY) print ""; c cyan "  $a written · $b already-canonical · $extra unreachable"
+             [[ "$a" -gt 0 ]] && c 244 "  each changed file backed up as <file>.bak-pigeon" ;;
+    esac
+  done <<< "$report"
+}
+
 case "${1:-}" in
   ""|setup) cmd_setup ;;
   gather)   shift; cmd_gather "$@" ;;
   check)    shift; cmd_check  "$@" ;;
   nest)     shift; cmd_nest   "$@" ;;
   stash)    shift; cmd_stash  "$@" ;;
+  site)     shift; cmd_site   "$@" ;;
+  fan)      shift; cmd_fan    "$@" ;;
   -h|--help|help) usage ;;
   *) die "unknown command: $1 (try \`$SELF help\`)" ;;
 esac
