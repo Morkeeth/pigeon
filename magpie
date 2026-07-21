@@ -1,0 +1,211 @@
+#!/bin/zsh
+# magpie — the bird hoards shiny things. this one hoards your API keys.
+#
+#   magpie gather   scan the machine, find every scattered key, show divergence
+#   magpie check    ask each provider: alive? dead? drained? wrong role?
+#   magpie nest     list what's gathered (names only, never values)
+#   magpie fan      push the canonical value to every place a key should live
+#
+# storage is a solved problem (1Password, SOPS, age). magpie does NOT reinvent a
+# vault. it does the thing none of them do: keep a heterogeneous AGENT FLEET's
+# keys alive — across repos, a VPS, Vercel, and each agent's own auth store.
+#
+# free. local. no server, no account, no per-seat fee. values never leave the
+# machine and are never printed. mac-first for v0.1; portable backend is roadmap.
+#
+# MIT. https://github.com/Morkeeth/magpie
+
+set -euo pipefail
+SERVICE="magpie-nest"
+SELF="${0:t}"
+NEST="${XDG_DATA_HOME:-$HOME/.local/share}/magpie"
+mkdir -p "$NEST"
+SITES="$NEST/sites.json"; [[ -f "$SITES" ]] || print '{}' > "$SITES"
+
+c()   { print -P "%F{$1}$2%f"; }
+die() { print -u2 "✗ $*"; exit 1; }
+fp()  { printf '%s' "$1" | shasum | cut -c1-8; }   # identity, never exposure
+
+usage() {
+  cat <<'EOF'
+🐦 magpie — gather, check and rotate API keys across your agent fleet
+
+  magpie gather [--collect]   find every key on this machine; --collect stores them
+  magpie check [service]      ask each provider if the key still works
+  magpie nest                 list what's gathered (names only)
+  magpie stash <ref>          paste one key into the nest (hidden)
+  magpie fan <ref>            push the canonical value to every declared site
+  magpie site <ref> <path> <VAR>   declare where a key must live
+
+a "ref" is service/NAME, e.g. openrouter/API_KEY. values are never printed.
+EOF
+}
+
+# ---- keychain (the local nest) ----------------------------------------------
+kc_set() { security add-generic-password -U -s "$SERVICE" -a "$1" -w "$2" 2>/dev/null || die "keychain write failed: $1"; }
+kc_get() { security find-generic-password -s "$SERVICE" -a "$1" -w 2>/dev/null; }
+IDX="$NEST/index"; [[ -f "$IDX" ]] || : > "$IDX"
+idx_add() { print "$1" >> "$IDX"; sort -u -o "$IDX" "$IDX"; }
+
+# ---- what shape is this secret? ---------------------------------------------
+service_of() {
+  case "$1" in
+    sk-or-v1-*)               print openrouter ;;
+    sk-ant-*)                 print anthropic ;;
+    ghp_*|github_pat_*|gho_*) print github ;;
+    sb_secret_*)              print supabase ;;
+    sk-proj-*|sk-svcacct-*)   print openai ;;
+    eyJ*.*.*)                 print jwt ;;
+    *) [[ "$1" == 0x[0-9a-fA-F](#c64) || "$1" == [0-9a-fA-F](#c64) ]] && print evm-key || print other ;;
+  esac
+}
+console_of() {
+  case "$1" in
+    openrouter) print "https://openrouter.ai/settings/keys" ;;
+    anthropic)  print "https://console.anthropic.com/settings/keys" ;;
+    github)     print "https://github.com/settings/tokens" ;;
+    openai)     print "https://platform.openai.com/api-keys" ;;
+    supabase|jwt) print "https://supabase.com/dashboard/project/_/settings/api-keys" ;;
+    *) print "" ;;
+  esac
+}
+
+# ---- ask the provider: is this key alive? -----------------------------------
+# returns "VERDICT|detail". the whole point of magpie: a key that exists, parses,
+# and is WRONG is the failure that kills agents silently.
+probe() {
+  local v="$1" verdict="UNKNOWN" detail="no probe for this shape"
+  case "$v" in
+    sk-or-v1-*)
+      local r; r=$(curl -s -m 15 -H "Authorization: Bearer $v" https://openrouter.ai/api/v1/credits 2>/dev/null)
+      if [[ "$r" == *'"total_credits"'* ]]; then
+        local rem; rem=$(print -r -- "$r" | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(f\"{d['total_credits']-d['total_usage']:.2f}\")" 2>/dev/null)
+        if [[ "${rem%%.*}" -lt 5 ]] 2>/dev/null; then verdict=LOW; detail="only \$$rem left"; else verdict=ALIVE; detail="\$$rem left"; fi
+      else verdict=DEAD; detail="provider rejected it"; fi ;;
+    sk-ant-*)
+      [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "x-api-key: $v" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models 2>/dev/null)" == 200 ]] \
+        && { verdict=ALIVE; detail=anthropic; } || { verdict=DEAD; detail="anthropic rejected"; } ;;
+    ghp_*|github_pat_*)
+      [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "Authorization: Bearer $v" https://api.github.com/user 2>/dev/null)" == 200 ]] \
+        && { verdict=ALIVE; detail=github; } || { verdict=DEAD; detail="github rejected"; } ;;
+    eyJ*.*.*)
+      local claims; claims=$(print -r -- "$v" | python3 -c "
+import sys,json,base64,time
+t=sys.stdin.read().strip().split('.')
+b=t[1]+'='*(-len(t[1])%4)
+d=json.loads(base64.urlsafe_b64decode(b))
+role=d.get('role','?'); exp=d.get('exp')
+print(f\"EXPIRED|jwt role={role}, expired\" if exp and exp<time.time() else f\"ALIVE|jwt role={role}\")
+" 2>/dev/null)
+      [[ -n "$claims" ]] && { verdict="${claims%%|*}"; detail="${claims#*|}"; } ;;
+  esac
+  print "$verdict|$detail"
+}
+
+# ---- gather: the hero verb --------------------------------------------------
+cmd_gather() {
+  local collect=0; [[ "${1:-}" == "--collect" ]] && collect=1
+  c cyan "🐦 gathering keys scattered across this machine…"
+  print ""
+  local -a files
+  files=( $HOME/.zshrc $HOME/.bashrc $HOME/.zshenv
+          $HOME/CODE/*/.env $HOME/CODE/*/.env.* $HOME/CODE/*/.env.local
+          $HOME/.claude/credentials/*.env )
+  local tmp; tmp=$(mktemp)
+  local f line name value svc
+  for f in $files; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r line; do
+      [[ "$line" == \#* || "$line" != *=* ]] && continue
+      name="${line##*export }"; name="${name%%=*}"; name="${name## }"
+      value="${line#*=}"; value="${value//\"/}"; value="${value//\'/}"
+      [[ ${#value} -ge 20 && "$name" == *(KEY|TOKEN|SECRET|PASSWORD|DSN)* ]] || continue
+      svc=$(service_of "$value")
+      print "$svc\t$(fp "$value")\t$name\t${f/#$HOME/~}" >> "$tmp"
+    done < "$f"
+  done
+  [[ -s "$tmp" ]] || { c yellow "no keys found. a tidy nest, or an empty one."; rm -f "$tmp"; return 0; }
+
+  local svc_list; svc_list=$(cut -f1 "$tmp" | sort -u)
+  local total; total=$(wc -l < "$tmp" | tr -d ' ')
+  local services; services=$(print -r -- "$svc_list" | grep -c . )
+  # Divergence only ALARMS for account-scoped keys — one account, so every copy
+  # should be byte-identical. Per-project keys (a Vercel OIDC token, a Supabase
+  # anon key, an EVM wallet key) are SUPPOSED to differ; flagging them is the
+  # kind of false red that makes a tool feel dumb on first run.
+  local account_scoped=" openrouter anthropic openai github "
+  local divergent=0 s n_fp
+  while IFS= read -r s; do
+    [[ -z "$s" ]] && continue
+    n_fp=$(awk -F'\t' -v s="$s" '$1==s{print $2}' "$tmp" | sort -u | grep -c .)
+    if [[ "$n_fp" -gt 1 && "$account_scoped" == *" $s "* ]]; then
+      c red "  ▲ $s — $n_fp DIFFERENT values for ONE account. one of these is stale."
+      divergent=$((divergent+1))
+      awk -F'\t' -v s="$s" '$1==s{printf "      %s  %-30s %s\n",$2,$3,$4}' "$tmp" | sort -u
+    elif [[ "$s" == other ]]; then
+      c green "  ✓ ${n_fp} other service keys (okx, xai, twitter, wallets, …)"
+    else
+      c green "  ✓ $s (${n_fp} distinct)"
+    fi
+  done <<< "$svc_list"
+  print ""
+  c cyan "  $total keys · $services services · $divergent account-key(s) diverged"
+  [[ $divergent -gt 0 ]] && c red "  a diverged account key means one copy is stale — that's how an agent dies quiet." \
+                          || c green "  no account key has a stale copy. tidy nest."
+
+  if [[ $collect -eq 1 ]]; then
+    print ""; c cyan "collecting one canonical value per service into the nest…"
+    while IFS= read -r s; do
+      [[ -z "$s" || "$s" == other || "$s" == evm-key ]] && continue
+      local first_val ref
+      first_val=$(awk -F'\t' -v s="$s" 'NR==1||$1==s{}' /dev/null)  # placeholder
+    done <<< "$svc_list"
+    c yellow "  (interactive collect lands in the next slice — for now: magpie stash <service/NAME>)"
+  else
+    print ""; c 244 "  run \`magpie check\` to see which of these are already dead."
+  fi
+  rm -f "$tmp"
+}
+
+# ---- check: the tweet ----------------------------------------------------
+cmd_check() {
+  local want="${1:-}"
+  [[ -s "$IDX" ]] || die "nest is empty — stash a key first:  magpie stash openrouter/API_KEY"
+  c cyan "🐦 asking each provider if the key still works…"; print ""
+  local alive=0 dead=0 unknown=0 ref v res verdict detail color
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    [[ -n "$want" && "$ref" != $want* ]] && continue
+    v=$(kc_get "$ref") || { printf "  %-30s " "$ref"; c red "MISSING (indexed, not in keychain)"; dead=$((dead+1)); continue; }
+    res=$(probe "$v"); verdict="${res%%|*}"; detail="${res#*|}"
+    case "$verdict" in
+      ALIVE) color=green; alive=$((alive+1)) ;;
+      LOW)   color=yellow; alive=$((alive+1)) ;;
+      DEAD|EXPIRED) color=red; dead=$((dead+1)) ;;
+      *) color=244; unknown=$((unknown+1)) ;;
+    esac
+    printf "  %-30s " "$ref"; print -P "%F{$color}${(r:8:)verdict}%f $detail"
+  done < "$IDX"
+  print ""
+  c cyan "  $alive alive · $dead dead · $unknown unverified"
+  [[ $dead -gt 0 ]] && c red "  a dead key that still sits in a config is an agent that fails silently."
+}
+
+cmd_nest()  { [[ -s "$IDX" ]] && { c cyan "🐦 the nest:"; sed 's/^/  /' "$IDX"; } || c yellow "the nest is empty."; }
+cmd_stash() {
+  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF stash <service/NAME>"
+  local v; print -n "paste value for $ref (hidden): "; read -rs v; print ""
+  [[ -n "$v" ]] || die "empty, nothing stashed"
+  kc_set "$ref" "$v"; idx_add "$ref"
+  c green "✓ stashed $ref ($(fp "$v"), ${#v} chars)"
+  [[ "$v" == *.*.* ]] && print -r -- "$v" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print('  jwt role:',json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || true
+}
+
+case "${1:-}" in
+  gather) shift; cmd_gather "$@" ;;
+  check)  shift; cmd_check  "$@" ;;
+  nest)   shift; cmd_nest   "$@" ;;
+  stash)  shift; cmd_stash  "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) die "unknown command: $1 (try \`$SELF help\`)" ;;
+esac

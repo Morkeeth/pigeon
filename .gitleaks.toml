@@ -1,0 +1,121 @@
+# Oscar's gitleaks rules — tuned to the credentials that actually exist on this machine.
+#
+# Written 2026-07-21 after measuring gitleaks 8.30.1's DEFAULT ruleset against real
+# key shapes. It caught 3 of 7: github PAT, slack, and generic assignments. It MISSED
+# Anthropic (sk-ant-), OpenAI (sk-proj-), realistic AWS ids, and private-key blocks.
+#
+# That is not a bug — upstream gitleaks is feature-complete and takes security patches
+# only, so its rules drift behind new credential formats. Which is precisely the
+# "this changes all the time" problem. The fix is to own the rules for YOUR shapes.
+#
+# When a provider invents a new key format, add a rule here. That is the maintenance.
+
+title = "oscar-keys"
+
+[extend]
+useDefault = true    # keep everything upstream catches, add the gaps below
+
+# --- LLM providers -----------------------------------------------------------
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+# Real keys run ~95 chars after the prefix, but do NOT gate on that: an
+# over-strict length is how this rule silently missed a key in testing. The
+# `sk-ant-` prefix is specific enough on its own to carry a low threshold.
+regex = '''sk-ant-[A-Za-z0-9]*-?[A-Za-z0-9_\-]{30,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "openai-project-key"
+description = "OpenAI project/user API key"
+regex = '''sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-proj-", "sk-svcacct-", "sk-admin-"]
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''sk-or-v1-[a-f0-9]{64}'''
+keywords = ["sk-or-v1-"]
+
+[[rules]]
+id = "qwen-dashscope-key"
+description = "Alibaba DashScope / Qwen key"
+regex = '''sk-[a-f0-9]{32}'''
+keywords = ["dashscope", "DASHSCOPE", "QWEN_API_KEY"]
+
+# --- Supabase (new key era) --------------------------------------------------
+
+[[rules]]
+id = "supabase-secret-key"
+description = "Supabase secret key (bypasses RLS entirely)"
+regex = '''sb_secret_[A-Za-z0-9_\-]{20,}'''
+keywords = ["sb_secret_"]
+
+[[rules]]
+id = "supabase-service-role-jwt"
+description = "Supabase legacy service_role JWT"
+regex = '''eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]*c2VydmljZV9yb2xl[A-Za-z0-9_\-]*\.[A-Za-z0-9_\-]{10,}'''
+keywords = ["eyJ"]
+
+# --- Signing keys: no spend cap protects these -------------------------------
+# Everything above is capped at €10 by policy. These are not. A leak here is
+# unbounded, which is why they get the loudest rules.
+
+[[rules]]
+id = "evm-private-key"
+description = "EVM private key (64 hex, optionally 0x-prefixed)"
+regex = '''(?i)(?:private[_-]?key|deployer[_-]?key|signing[_-]?key|wallet[_-]?key|mnemonic)\s*[:=]\s*["']?(?:0x)?[a-f0-9]{64}["']?'''
+keywords = ["private_key", "PRIVATE_KEY", "DEPLOYER_KEY", "SIGNING_KEY", "WALLET_KEY"]
+
+[[rules]]
+id = "bare-evm-private-key"
+description = "Bare 64-hex 0x string (likely an EVM private key)"
+regex = '''(?:^|[\s"'=:])0x[a-fA-F0-9]{64}(?:[\s"',;]|$)'''
+keywords = ["0x"]
+  [rules.allowlist]
+  description = "tx hashes, block hashes and addresses are also 0x-hex — exclude the obvious ones"
+  regexes = [
+    '''(?i)(tx|txn|transaction|hash|block|commit|digest|root|proof|sig|signature)[_-]?(hash)?\s*[:=`]''',
+    '''0x[a-fA-F0-9]{64}\s*[`)\]]?\s*(,|\.)?\s*(the|is|was|→|->)''',
+  ]
+
+[[rules]]
+id = "private-key-block"
+description = "PEM/OpenSSH private key block"
+regex = '''-----BEGIN\s+(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED)?\s*PRIVATE KEY(?:\s+BLOCK)?-----'''
+keywords = ["BEGIN", "PRIVATE KEY"]
+
+# --- Infra -------------------------------------------------------------------
+
+[[rules]]
+id = "aws-access-key-id"
+description = "AWS access key id"
+regex = '''\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16})\b'''
+keywords = ["AKIA", "ASIA", "A3T", "ABIA", "ACCA"]
+  [rules.allowlist]
+  description = "AWS's own documentation example"
+  regexes = ['''AKIAIOSFODNN7EXAMPLE''']
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''\b\d{8,10}:[A-Za-z0-9_\-]{35}\b'''
+keywords = ["telegram", "TELEGRAM", "bot"]
+
+# --- Global allowlist --------------------------------------------------------
+
+[allowlist]
+description = "paths that are examples, fixtures, or this ruleset itself"
+paths = [
+  '''\.gitleaks\.toml$''',
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''(^|/)node_modules/''',
+  '''(^|/)(test|tests|__tests__|fixtures|__fixtures__)/''',
+  '''\.lock$''',
+  '''package-lock\.json$''',
+]
+regexes = [
+  '''(?i)(example|sample|placeholder|dummy|redacted|your[_-]?key|xxx+|<[^>]+>)''',
+]

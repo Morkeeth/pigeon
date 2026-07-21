@@ -1,0 +1,8 @@
+# never commit the nest, its index, or anything key-shaped
+*.env
+*.env.*
+!.env.example
+index
+sites.json
+meta.json
+.DS_Store
