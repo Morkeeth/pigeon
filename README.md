@@ -53,8 +53,10 @@ magpie fan <ref>       push the canonical value everywhere it should live
 ```bash
 git clone https://github.com/Morkeeth/magpie
 ln -s "$PWD/magpie/magpie" ~/.local/bin/magpie   # or anywhere on your PATH
-magpie gather
+magpie
 ```
+
+That last line — bare `magpie` — is the whole thing: it scans your machine, tells you which keys are dead, drained, or the wrong role, and **walks you through pasting fresh ones**, verifying each with the provider before it stores it. No AI (you have no keys yet to run one), no dashboard, no account. One command, a guided paste, done.
 
 Requires `zsh`, `curl`, `python3`, and macOS Keychain. Backend is the macOS Keychain for now; a portable [age](https://github.com/FiloSottile/age)-based backend for Linux and shared/team nests is the next slice.
 

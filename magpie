@@ -201,11 +201,80 @@ cmd_stash() {
   [[ "$v" == *.*.* ]] && print -r -- "$v" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print('  jwt role:',json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || true
 }
 
+# ---- setup: ONE command, a smooth guided paste flow ------------------------
+# the whole product in one verb. you run `magpie`, it tells you what's broken,
+# and walks you through pasting fresh keys — verifying each one live before it
+# stores it. no AI (you have no keys yet to run one), no dashboard, no account.
+cmd_setup() {
+  c cyan "🐦 hi. let's sort out your keys."; print ""
+  if [[ ! -t 0 ]]; then
+    c yellow "  (this is an interactive flow — run \`magpie\` in a real terminal.)"
+    print "  or use the verbs directly: magpie gather · magpie check · magpie stash <ref>"
+    return 0
+  fi
+
+  print "  scanning your machine…"
+  local tmp; tmp=$(mktemp)
+  local f line name value svc
+  for f in $HOME/.zshrc $HOME/CODE/*/.env $HOME/CODE/*/.env.local $HOME/.claude/credentials/*.env; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r line; do
+      [[ "$line" == \#* || "$line" != *=* ]] && continue
+      name="${line##*export }"; name="${name%%=*}"; name="${name## }"
+      value="${line#*=}"; value="${value//\"/}"; value="${value//\'/}"
+      [[ ${#value} -ge 20 && "$name" == *(KEY|TOKEN|SECRET)* ]] || continue
+      svc=$(service_of "$value")
+      print "$svc\t$value" >> "$tmp"
+    done < "$f"
+  done
+
+  # For each service we know how to probe, show its current state, then offer a
+  # fresh paste for anything DEAD / LOW / not yet in the nest.
+  local -a services; services=(openrouter anthropic openai github supabase)
+  print ""; c cyan "  here's what I found:"; print ""
+  local s val res verdict detail fresh
+  for s in $services; do
+    val=$(awk -F'\t' -v s="$s" '$1==s{print $2; exit}' "$tmp")
+    local stored; stored=$(kc_get "$s/API_KEY" 2>/dev/null || true)
+    [[ -z "$val" && -n "$stored" ]] && val="$stored"
+
+    if [[ -z "$val" ]]; then
+      printf "  %-12s " "$s"; c 244 "not found"
+      continue
+    fi
+    res=$(probe "$val"); verdict="${res%%|*}"; detail="${res#*|}"
+    case "$verdict" in
+      ALIVE) printf "  %-12s " "$s"; print -P "%F{green}ALIVE%f  $detail"; continue ;;
+      LOW)   printf "  %-12s " "$s"; print -P "%F{yellow}LOW%f    $detail — worth replacing" ;;
+      DEAD|EXPIRED) printf "  %-12s " "$s"; print -P "%F{red}DEAD%f   $detail" ;;
+      *)     printf "  %-12s " "$s"; print -P "%F{green}$verdict%f $detail"; continue ;;
+    esac
+
+    # broken → guided paste
+    print -n "  └─ paste a fresh $s key here (hidden, or Enter to skip) ▸ "
+    read -rs fresh; print ""
+    [[ -z "$fresh" ]] && { c 244 "     skipped."; continue; }
+    local vres; vres=$(probe "$fresh"); local vv="${vres%%|*}"
+    if [[ "$vv" == DEAD || "$vv" == EXPIRED ]]; then
+      c red "     that one's also rejected by the provider — not stored. try again with \`magpie stash $s/API_KEY\`."
+      continue
+    fi
+    kc_set "$s/API_KEY" "$fresh"; idx_add "$s/API_KEY"
+    c green "     ✓ verified (${vres#*|}) and gathered into the nest."
+  done
+  rm -f "$tmp"
+
+  print ""; c cyan "🐦 your nest:"
+  cmd_check 2>/dev/null || true
+  print ""; c 244 "  run \`magpie\` anytime to re-check, or \`magpie fan <ref>\` to push a key everywhere it lives."
+}
+
 case "${1:-}" in
-  gather) shift; cmd_gather "$@" ;;
-  check)  shift; cmd_check  "$@" ;;
-  nest)   shift; cmd_nest   "$@" ;;
-  stash)  shift; cmd_stash  "$@" ;;
-  -h|--help|help|"") usage ;;
+  ""|setup) cmd_setup ;;
+  gather)   shift; cmd_gather "$@" ;;
+  check)    shift; cmd_check  "$@" ;;
+  nest)     shift; cmd_nest   "$@" ;;
+  stash)    shift; cmd_stash  "$@" ;;
+  -h|--help|help) usage ;;
   *) die "unknown command: $1 (try \`$SELF help\`)" ;;
 esac
