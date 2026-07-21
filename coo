@@ -1,24 +1,24 @@
 #!/bin/zsh
-# magpie — the bird hoards shiny things. this one hoards your API keys.
+# pigeon — carrier pigeon for your API keys. gather them, check them, keep them alive.
 #
-#   magpie gather   scan the machine, find every scattered key, show divergence
-#   magpie check    ask each provider: alive? dead? drained? wrong role?
-#   magpie nest     list what's gathered (names only, never values)
-#   magpie fan      push the canonical value to every place a key should live
+#   coo gather   scan the machine, find every scattered key, show divergence
+#   coo check    ask each provider: alive? dead? drained? wrong role?
+#   coo nest     list what's gathered (names only, never values)
+#   coo fan      push the canonical value to every place a key should live
 #
-# storage is a solved problem (1Password, SOPS, age). magpie does NOT reinvent a
+# storage is a solved problem (1Password, SOPS, age). pigeon does NOT reinvent a
 # vault. it does the thing none of them do: keep a heterogeneous AGENT FLEET's
 # keys alive — across repos, a VPS, Vercel, and each agent's own auth store.
 #
 # free. local. no server, no account, no per-seat fee. values never leave the
 # machine and are never printed. mac-first for v0.1; portable backend is roadmap.
 #
-# MIT. https://github.com/Morkeeth/magpie
+# MIT. https://github.com/Morkeeth/pigeon
 
 set -euo pipefail
-SERVICE="magpie-nest"
+SERVICE="pigeon-nest"
 SELF="${0:t}"
-NEST="${XDG_DATA_HOME:-$HOME/.local/share}/magpie"
+NEST="${XDG_DATA_HOME:-$HOME/.local/share}/pigeon"
 mkdir -p "$NEST"
 SITES="$NEST/sites.json"; [[ -f "$SITES" ]] || print '{}' > "$SITES"
 
@@ -28,14 +28,14 @@ fp()  { printf '%s' "$1" | shasum | cut -c1-8; }   # identity, never exposure
 
 usage() {
   cat <<'EOF'
-🐦 magpie — gather, check and rotate API keys across your agent fleet
+🐦 pigeon — gather, check and rotate API keys across your agent fleet
 
-  magpie gather [--collect]   find every key on this machine; --collect stores them
-  magpie check [service]      ask each provider if the key still works
-  magpie nest                 list what's gathered (names only)
-  magpie stash <ref>          paste one key into the nest (hidden)
-  magpie fan <ref>            push the canonical value to every declared site
-  magpie site <ref> <path> <VAR>   declare where a key must live
+  coo gather [--collect]   find every key on this machine; --collect stores them
+  coo check [service]      ask each provider if the key still works
+  coo nest                 list what's gathered (names only)
+  coo stash <ref>          paste one key into the nest (hidden)
+  coo fan <ref>            push the canonical value to every declared site
+  coo site <ref> <path> <VAR>   declare where a key must live
 
 a "ref" is service/NAME, e.g. openrouter/API_KEY. values are never printed.
 EOF
@@ -71,7 +71,7 @@ console_of() {
 }
 
 # ---- ask the provider: is this key alive? -----------------------------------
-# returns "VERDICT|detail". the whole point of magpie: a key that exists, parses,
+# returns "VERDICT|detail". the whole point of pigeon: a key that exists, parses,
 # and is WRONG is the failure that kills agents silently.
 probe() {
   local v="$1" verdict="UNKNOWN" detail="no probe for this shape"
@@ -160,9 +160,9 @@ cmd_gather() {
       local first_val ref
       first_val=$(awk -F'\t' -v s="$s" 'NR==1||$1==s{}' /dev/null)  # placeholder
     done <<< "$svc_list"
-    c yellow "  (interactive collect lands in the next slice — for now: magpie stash <service/NAME>)"
+    c yellow "  (interactive collect lands in the next slice — for now: coo stash <service/NAME>)"
   else
-    print ""; c 244 "  run \`magpie check\` to see which of these are already dead."
+    print ""; c 244 "  run \`coo check\` to see which of these are already dead."
   fi
   rm -f "$tmp"
 }
@@ -170,7 +170,7 @@ cmd_gather() {
 # ---- check: the tweet ----------------------------------------------------
 cmd_check() {
   local want="${1:-}"
-  [[ -s "$IDX" ]] || die "nest is empty — stash a key first:  magpie stash openrouter/API_KEY"
+  [[ -s "$IDX" ]] || die "nest is empty — stash a key first:  coo stash openrouter/API_KEY"
   c cyan "🐦 asking each provider if the key still works…"; print ""
   local alive=0 dead=0 unknown=0 ref v res verdict detail color
   while IFS= read -r ref; do
@@ -202,14 +202,14 @@ cmd_stash() {
 }
 
 # ---- setup: ONE command, a smooth guided paste flow ------------------------
-# the whole product in one verb. you run `magpie`, it tells you what's broken,
+# the whole product in one verb. you run `coo`, it tells you what's broken,
 # and walks you through pasting fresh keys — verifying each one live before it
 # stores it. no AI (you have no keys yet to run one), no dashboard, no account.
 cmd_setup() {
   c cyan "🐦 hi. let's sort out your keys."; print ""
   if [[ ! -t 0 ]]; then
-    c yellow "  (this is an interactive flow — run \`magpie\` in a real terminal.)"
-    print "  or use the verbs directly: magpie gather · magpie check · magpie stash <ref>"
+    c yellow "  (this is an interactive flow — run \`coo\` in a real terminal.)"
+    print "  or use the verbs directly: coo gather · coo check · coo stash <ref>"
     return 0
   fi
 
@@ -256,7 +256,7 @@ cmd_setup() {
     [[ -z "$fresh" ]] && { c 244 "     skipped."; continue; }
     local vres; vres=$(probe "$fresh"); local vv="${vres%%|*}"
     if [[ "$vv" == DEAD || "$vv" == EXPIRED ]]; then
-      c red "     that one's also rejected by the provider — not stored. try again with \`magpie stash $s/API_KEY\`."
+      c red "     that one's also rejected by the provider — not stored. try again with \`coo stash $s/API_KEY\`."
       continue
     fi
     kc_set "$s/API_KEY" "$fresh"; idx_add "$s/API_KEY"
@@ -266,7 +266,7 @@ cmd_setup() {
 
   print ""; c cyan "🐦 your nest:"
   cmd_check 2>/dev/null || true
-  print ""; c 244 "  run \`magpie\` anytime to re-check, or \`magpie fan <ref>\` to push a key everywhere it lives."
+  print ""; c 244 "  run \`coo\` anytime to re-check, or \`coo fan <ref>\` to push a key everywhere it lives."
 }
 
 case "${1:-}" in

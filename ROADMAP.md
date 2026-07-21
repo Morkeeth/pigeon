@@ -1,6 +1,6 @@
 # Roadmap
 
-The bet: **key ops for agent fleets, not human teams.** Storage is solved and priced per human seat. A fleet has zero humans and its keys silently drift and die. magpie keeps them alive.
+The bet: **key ops for agent fleets, not human teams.** Storage is solved and priced per human seat. A fleet has zero humans and its keys silently drift and die. pigeon keeps them alive.
 
 Ordered by leverage. Each slice is independently shippable and dogfooded before the next.
 
@@ -34,5 +34,5 @@ An MCP endpoint so an agent can ask "is my key alive / how much budget is left" 
 ## Non-goals (on purpose)
 - Not a vault. Sits on storage, never rebuilds it.
 - Not a server, not an account, not per-seat.
-- Not a security product. The real control is a spend cap per key; magpie makes it visible.
+- Not a security product. The real control is a spend cap per key; pigeon makes it visible.
 - No AI in the setup path — you have no keys yet to run one, and deterministic is faster anyway.
