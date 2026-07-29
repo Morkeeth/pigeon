@@ -31,7 +31,8 @@ usage() {
   cat <<'EOF'
 🐦 pigeon — gather, check and rotate API keys across your agent fleet
 
-  coo                      the whole guide: scans, checks, walks you through fixes
+  coo                      the wizard: pick a key, guided grab, paste once, lands everywhere
+  coo doctor               scan + probe everything and walk through fixes
   coo install              put coo on your PATH (run once, then just type coo)
   coo gather [--collect]   find every key on this machine; --collect stores them
   coo check [service]      ask each provider if the key still works
@@ -70,7 +71,28 @@ console_of() {
     github)     print "https://github.com/settings/tokens" ;;
     openai)     print "https://platform.openai.com/api-keys" ;;
     supabase|jwt) print "https://supabase.com/dashboard/project/_/settings/api-keys" ;;
+    vercel)     print "https://vercel.com/account/settings/tokens" ;;
+    xai)        print "https://console.x.ai" ;;
+    google)     print "https://aistudio.google.com/apikey" ;;
+    mistral)    print "https://console.mistral.ai/api-keys" ;;
+    elevenlabs) print "https://elevenlabs.io/app/settings/api-keys" ;;
     *) print "" ;;
+  esac
+}
+
+# how a human actually retrieves each key — shown in the wizard, step by step.
+guide_of() {
+  case "$1" in
+    openai)     print "1. the browser opens at platform.openai.com/api-keys\n2. 'Create new secret key' (or copy an existing one)\n3. copy the sk-proj-… value" ;;
+    anthropic)  print "1. the browser opens at console.anthropic.com\n2. 'Create Key' → copy the sk-ant-… value" ;;
+    openrouter) print "1. the browser opens at openrouter.ai/settings/keys\n2. 'Create Key' → copy the sk-or-v1-… value" ;;
+    supabase)   print "1. the browser opens at your supabase dashboard → pick the project\n2. Settings → API keys\n3. Reveal + copy the SERVICE_ROLE key — the secret one, NOT anon" ;;
+    github)     print "1. the browser opens at github.com/settings/tokens\n2. generate or copy a token (ghp_… or github_pat_…)" ;;
+    vercel)     print "1. the browser opens at vercel.com account tokens\n2. create a token → copy it" ;;
+    xai)        print "1. the browser opens at console.x.ai\n2. API keys → create or copy" ;;
+    google)     print "1. the browser opens at aistudio.google.com/apikey\n2. create or copy the key" ;;
+    mistral)    print "1. the browser opens at console.mistral.ai/api-keys\n2. create or copy the key" ;;
+    *)          print "grab the key from your provider's console, then come back" ;;
   esac
 }
 
@@ -203,6 +225,108 @@ cmd_stash() {
   kc_set "$ref" "$v"; idx_add "$ref"
   c green "✓ stashed $ref ($(fp "$v"), ${#v} chars)"
   [[ "$v" == *.*.* ]] && print -r -- "$v" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print('  jwt role:',json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || true
+}
+
+# ---- paste_and_land: one guided paste, verified, delivered everywhere -------
+paste_and_land() {
+  local ref="$1" svc="${1%%/*}"
+  local url; url=$(console_of "$svc")
+  print ""; c cyan "  $svc — how to grab it:"
+  guide_of "$svc" | sed 's/^/    /'
+  if [[ -n "$url" && -z "${COO_TEST:-}" ]]; then
+    open "$url" >/dev/null 2>&1 || true
+    c 244 "    (browser opened: $url)"
+  fi
+  print -n "  paste it here (hidden, Enter to cancel) ▸ "
+  local v; read -rs v || true; print ""
+  [[ -z "$v" ]] && { c 244 "  cancelled — nothing stored."; return 1; }
+
+  # supabase wants the SERVICE_ROLE key specifically; catch the classic wrong-row copy.
+  if [[ "$ref" == supabase/* && "$v" == eyJ*.*.* ]]; then
+    local role
+    role=$(print -r -- "$v" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print(json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || print "?")
+    if [[ "$role" != "service_role" ]]; then
+      c red "  ✗ that's the '$role' key — the wrong row. we need SERVICE_ROLE (marked secret). not stored."
+      return 1
+    fi
+    c green "  ✓ jwt role: service_role — the right one."
+  fi
+
+  local res verdict detail; res=$(probe "$v"); verdict="${res%%|*}"; detail="${res#*|}"
+  case "$verdict" in
+    DEAD|EXPIRED) c red "  ✗ the provider rejects that key ($detail). not stored — grab a fresh one and retry."; return 1 ;;
+    ALIVE|LOW)    c green "  ✓ verified live with the provider: $detail" ;;
+    *)            c 244 "  no live probe for this shape yet — storing it as-is ($(fp "$v"), ${#v} chars)" ;;
+  esac
+
+  kc_set "$ref" "$v"; idx_add "$ref"
+  c green "  ✓ stashed $ref"
+  local n_sites
+  n_sites=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d.get(sys.argv[2],[])))" "$SITES" "$ref" 2>/dev/null || print 0)
+  if [[ "$n_sites" -gt 0 ]]; then
+    cmd_fan "$ref" || true
+  else
+    c 244 "  it lives safe in the nest. to auto-deliver it into a project: coo site $ref <file> <VAR>"
+  fi
+  return 0
+}
+
+# ---- the wizard: what bare `coo` runs. zero args, zero memorizing. -----------
+cmd_wizard() {
+  if [[ ! -t 0 && -z "${COO_TEST:-}" ]]; then
+    c cyan "🐦 hi. run \`coo\` in a real terminal for the guided flow."
+    print "  or use verbs directly: coo gather · coo check · coo stash <ref> · coo help"
+    return 0
+  fi
+  c cyan "🐦 pigeon — let's sort your keys."
+
+  # unfinished business first: a declared home with no key in the nest.
+  local -a pending; local sref
+  while IFS= read -r sref; do
+    [[ -z "$sref" ]] && continue
+    kc_get "$sref" >/dev/null 2>&1 || pending+=("$sref")
+  done <<< "$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).keys()))" "$SITES" 2>/dev/null || true)"
+  if (( ${#pending} > 0 )); then
+    print ""; c yellow "  unfinished setup: ${pending[1]} (a home is declared, the key is missing)"
+    print -n "  press Enter to finish it now, or m for the menu ▸ "
+    local a; read -r a || true
+    if [[ -z "$a" ]]; then
+      paste_and_land "${pending[1]}" && return 0
+    fi
+  fi
+
+  while true; do
+    print ""
+    print "  what do you want to do?"
+    print "    1) set up a key     pick a provider, grab it (guided), paste once — it lands everywhere"
+    print "    2) check my keys    ask each provider: alive, dead, drained?"
+    print "    3) find keys        scan this machine for scattered copies"
+    print "    q) quit"
+    print -n "  ▸ "
+    local choice; read -r choice || return 0
+    case "$choice" in
+      1)
+        print ""
+        print "    1) openai       2) anthropic    3) openrouter"
+        print "    4) supabase     5) github       6) vercel"
+        print "    7) xai/grok     8) google       9) mistral"
+        print "    0) something else (type service/NAME yourself)"
+        print -n "  which key? ▸ "
+        local p ref=""; read -r p || return 0
+        case "$p" in
+          1) ref=openai/API_KEY ;;  2) ref=anthropic/API_KEY ;; 3) ref=openrouter/API_KEY ;;
+          4) ref=supabase/SERVICE_KEY ;; 5) ref=github/TOKEN ;; 6) ref=vercel/TOKEN ;;
+          7) ref=xai/API_KEY ;;     8) ref=google/API_KEY ;;    9) ref=mistral/API_KEY ;;
+          0) print -n "  ref (service/NAME) ▸ "; read -r ref || return 0 ;;
+          *) c 244 "  never mind."; continue ;;
+        esac
+        [[ -n "$ref" ]] && { paste_and_land "$ref" || true; } ;;
+      2) print ""; cmd_check || true ;;
+      3) print ""; cmd_gather || true ;;
+      q|Q|"") return 0 ;;
+      *) c 244 "  1, 2, 3 or q." ;;
+    esac
+  done
 }
 
 # ---- install: one time, then `coo` works from anywhere ----------------------
@@ -443,7 +567,8 @@ for x in d.get(os.environ['REF'], []):
 }
 
 case "${1:-}" in
-  ""|setup) cmd_setup ;;
+  ""|setup) cmd_wizard ;;
+  doctor)   cmd_setup ;;
   install)  cmd_install ;;
   gather)   shift; cmd_gather "$@" ;;
   check)    shift; cmd_check  "$@" ;;
