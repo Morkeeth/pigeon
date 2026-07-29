@@ -18,6 +18,7 @@
 set -euo pipefail
 SERVICE="pigeon-nest"
 SELF="${0:t}"
+SELF_PATH="${0:A}"   # resolved at top level, where $0 is the script — inside a function zsh makes $0 the function name
 NEST="${XDG_DATA_HOME:-$HOME/.local/share}/pigeon"
 mkdir -p "$NEST"
 SITES="$NEST/sites.json"; [[ -f "$SITES" ]] || print '{}' > "$SITES"
@@ -30,6 +31,8 @@ usage() {
   cat <<'EOF'
 🐦 pigeon — gather, check and rotate API keys across your agent fleet
 
+  coo                      the whole guide: scans, checks, walks you through fixes
+  coo install              put coo on your PATH (run once, then just type coo)
   coo gather [--collect]   find every key on this machine; --collect stores them
   coo check [service]      ask each provider if the key still works
   coo nest                 list what's gathered (names only)
@@ -38,6 +41,7 @@ usage() {
   coo site <ref> <path> <VAR>   declare where a key must live
 
 a "ref" is service/NAME, e.g. openrouter/API_KEY. values are never printed.
+lost? just type coo — it will tell you what's broken and fix it with you.
 EOF
 }
 
@@ -201,6 +205,18 @@ cmd_stash() {
   [[ "$v" == *.*.* ]] && print -r -- "$v" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print('  jwt role:',json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || true
 }
 
+# ---- install: one time, then `coo` works from anywhere ----------------------
+cmd_install() {
+  local bin="$HOME/.local/bin"; mkdir -p "$bin"
+  ln -sf "$SELF_PATH" "$bin/coo"
+  c green "✓ installed: $bin/coo → $SELF_PATH"
+  case ":$PATH:" in
+    *":$bin:"*) c cyan "  done. type \`coo\` from anywhere — that's the whole guide." ;;
+    *) c yellow "  one more step — $bin is not on your PATH. run:"
+       print "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && exec zsh" ;;
+  esac
+}
+
 # ---- setup: ONE command, a smooth guided paste flow ------------------------
 # the whole product in one verb. you run `coo`, it tells you what's broken,
 # and walks you through pasting fresh keys — verifying each one live before it
@@ -263,6 +279,32 @@ cmd_setup() {
     c green "     ✓ verified (${vres#*|}) and gathered into the nest."
   done
   rm -f "$tmp"
+
+  # ---- pending sites: any key with a declared home gets FINISHED right here.
+  # this is the piece that makes `coo` the whole guide: if a site was declared
+  # (by you, or an agent setting up a task), the flow ends with the key landed —
+  # never with "now go run two more commands."
+  local site_refs
+  site_refs=$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).keys()))" "$SITES" 2>/dev/null || true)
+  if [[ -n "$site_refs" ]]; then
+    print ""; c cyan "  keys with declared homes:"
+    local sref sv
+    while IFS= read -r sref; do
+      [[ -z "$sref" ]] && continue
+      if kc_get "$sref" >/dev/null 2>&1; then
+        cmd_fan "$sref" || true
+      else
+        c yellow "  $sref has a declared home but no key in the nest yet."
+        print -n "  └─ paste it now (hidden, or Enter to skip) ▸ "
+        read -rs sv; print ""
+        if [[ -z "$sv" ]]; then c 244 "     skipped."; continue; fi
+        kc_set "$sref" "$sv"; idx_add "$sref"
+        c green "     ✓ stashed $sref ($(fp "$sv"), ${#sv} chars)"
+        [[ "$sv" == *.*.* ]] && print -r -- "$sv" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print('     jwt role:',json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || true
+        cmd_fan "$sref" || true
+      fi
+    done <<< "$site_refs"
+  fi
 
   print ""; c cyan "🐦 your nest:"
   cmd_check 2>/dev/null || true
@@ -358,6 +400,7 @@ PY
 
 case "${1:-}" in
   ""|setup) cmd_setup ;;
+  install)  cmd_install ;;
   gather)   shift; cmd_gather "$@" ;;
   check)    shift; cmd_check  "$@" ;;
   nest)     shift; cmd_nest   "$@" ;;
