@@ -295,6 +295,8 @@ cmd_setup() {
         cmd_fan "$sref" || true
       else
         c yellow "  $sref has a declared home but no key in the nest yet."
+        local surl; surl=$(console_of "${sref%%/*}")
+        [[ -n "$surl" ]] && { c 244 "     opening where it lives: $surl"; open "$surl" >/dev/null 2>&1 || true; }
         print -n "  └─ paste it now (hidden, or Enter to skip) ▸ "
         read -rs sv; print ""
         if [[ -z "$sv" ]]; then c 244 "     skipped."; continue; fi
@@ -317,7 +319,23 @@ cmd_setup() {
 # replaced. this is the fix for the bug that started pigeon: four copies, one
 # goes stale, an agent dies quiet. values are never printed — only fingerprints.
 cmd_site() {
-  local ref="${1:-}" target="${2:-}" var="${3:-}"   # never name a local `path` in zsh
+  local ref="${1:-}"
+  if [[ "${2:-}" == "--vercel" ]]; then
+    local cwd="${3:-}" var="${4:-}" env="${5:-production}"
+    [[ -n "$ref" && -n "$cwd" && -n "$var" ]] \
+      || die "usage: $SELF site <service/NAME> --vercel <project-dir> <VAR_NAME> [environment]"
+    SITES_F="$SITES" REF="$ref" P="${cwd/#\~/$HOME}" V="$var" E="$env" python3 - <<'PY'
+import json, os
+f = os.environ['SITES_F']; d = json.load(open(f))
+entry = {"type": "vercel", "cwd": os.environ['P'], "var": os.environ['V'], "env": os.environ['E']}
+lst = d.setdefault(os.environ['REF'], [])
+if entry not in lst: lst.append(entry)
+json.dump(d, open(f, 'w'), indent=2)
+print(f"declared: {os.environ['REF']} → vercel {os.environ['E']} ({os.environ['V']}, project {os.environ['P']})")
+PY
+    return 0
+  fi
+  local target="${2:-}" var="${3:-}"   # never name a local `path` in zsh
   [[ -n "$ref" && -n "$target" && -n "$var" ]] \
     || die "usage: $SELF site <service/NAME> <file-path> <VAR_NAME>"
   SITES_F="$SITES" REF="$ref" P="${target/#\~/$HOME}" V="$var" python3 - <<'PY'
@@ -345,7 +363,7 @@ cmd_fan() {
 import json, os, shutil, hashlib, sys
 d = json.load(open(os.environ['SITES_F'])); ref = os.environ['REF']; can = os.environ['CAN']
 def fp(v): return hashlib.sha1(v.encode()).hexdigest()[:8]
-sites = d.get(ref, [])
+sites = [x for x in d.get(ref, []) if x.get('type') != 'vercel']
 if not sites:
     print("NOSITES"); sys.exit(0)
 w=s=m=0
@@ -381,21 +399,47 @@ for site in sites:
 print(f"TALLY\t{w}\t{s}\t{m}")
 PY
 )
+  local had_files=1
   if [[ "$report" == "NOSITES" ]]; then
+    had_files=0
+  else
+    local kind a b extra
+    while IFS=$'\t' read -r kind a b extra; do
+      case "$kind" in
+        WROTE) c green  "  ✓ ${a/#$HOME/~}  $b" ;;
+        SAME)  c 244    "  · ${a/#$HOME/~}  $b" ;;
+        MISS)  c yellow "  ⚠ ${a/#$HOME/~}  $b" ;;
+        TALLY) print ""; c cyan "  $a written · $b already-canonical · $extra unreachable"
+               [[ "$a" -gt 0 ]] && c 244 "  each changed file backed up as <file>.bak-pigeon" ;;
+      esac
+    done <<< "$report"
+  fi
+
+  # vercel sites: pipe the value straight into `vercel env`, never through a
+  # human's clipboard twice. rm-then-add because add alone refuses duplicates.
+  local vsites
+  vsites=$(SITES_F="$SITES" REF="$ref" python3 -c "
+import json, os
+d = json.load(open(os.environ['SITES_F']))
+for x in d.get(os.environ['REF'], []):
+    if x.get('type') == 'vercel':
+        print(f\"{x['cwd']}\t{x['var']}\t{x.get('env','production')}\")" 2>/dev/null || true)
+  if [[ -n "$vsites" ]]; then
+    local vcwd vvar venv
+    while IFS=$'\t' read -r vcwd vvar venv; do
+      [[ -z "$vcwd" ]] && continue
+      c cyan "  vercel: $vvar → $venv (${vcwd/#$HOME/~})…"
+      if (cd "$vcwd" && { npx vercel env rm "$vvar" "$venv" --yes >/dev/null 2>&1 || true; } \
+            && printf '%s' "$can" | npx vercel env add "$vvar" "$venv" >/dev/null 2>&1); then
+        c green "  ✓ vercel env $vvar ($venv) updated — redeploy to make it live"
+      else
+        c red "  ✗ vercel update failed. manual: cd ${vcwd/#$HOME/~} && npx vercel env add $vvar $venv"
+      fi
+    done <<< "$vsites"
+  elif [[ $had_files -eq 0 ]]; then
     c yellow "  no sites declared for $ref."
     print "  declare one:  $SELF site $ref ~/CODE/yourproj/.env OPENROUTER_API_KEY"
-    return 0
   fi
-  local kind a b extra
-  while IFS=$'\t' read -r kind a b extra; do
-    case "$kind" in
-      WROTE) c green  "  ✓ ${a/#$HOME/~}  $b" ;;
-      SAME)  c 244    "  · ${a/#$HOME/~}  $b" ;;
-      MISS)  c yellow "  ⚠ ${a/#$HOME/~}  $b" ;;
-      TALLY) print ""; c cyan "  $a written · $b already-canonical · $extra unreachable"
-             [[ "$a" -gt 0 ]] && c 244 "  each changed file backed up as <file>.bak-pigeon" ;;
-    esac
-  done <<< "$report"
 }
 
 case "${1:-}" in
