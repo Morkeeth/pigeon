@@ -41,6 +41,7 @@ RECENT="$NEST/recent"      # providers you actually reach for, most-recent-first
 #          your scrollback when it closes.
 #   OSC8 — hyperlinks. A URL stays exactly as readable as before, and becomes
 #          clickable where the terminal supports it.
+integer CLIP_ONLY=0
 SYNC_ON=$'\e[?2026h'; SYNC_OFF=$'\e[?2026l'
 ALT_ON=$'\e[?1049h';  ALT_OFF=$'\e[?1049l'
 CUR_HIDE=$'\e[?25l';  CUR_SHOW=$'\e[?25h'
@@ -94,6 +95,7 @@ you never need anything below. they are shortcuts into the same flow:
   coo delete <ref>   remove a key
   coo fix            probe everything on this machine and repair what's broken
   coo pending        what an agent set up that still needs your paste
+  coo add <ref> --clipboard   take what you copied, verify it, land it. no prompts.
   coo install        put coo on your PATH
 
 for scripts and agents:
@@ -852,11 +854,25 @@ paste_and_land() {
   local url; url=$(console_of "$svc")
   local v="" clip clipsvc cans ob
 
+  # --clipboard: the whole flow with no prompts at all, so an AGENT can trigger
+  # it. The key goes clipboard → keychain → your files and is never printed and
+  # never passes through the thing that launched it. Anything ambiguous refuses
+  # rather than guessing, because nobody is watching to answer a question.
+  if (( CLIP_ONLY )); then
+    command -v pbpaste >/dev/null 2>&1 || { c red "  ✗ no pbpaste — --clipboard is macOS-only."; return 1 }
+    v=$(pbpaste 2>/dev/null | tr -d '[:space:]')
+    if (( ${#v} < 20 )); then
+      c red "  ✗ the clipboard doesn't hold a key (${#v} chars). copy it, then run this again."
+      return 1
+    fi
+    clipsvc=$(detect_provider "$v")
+    c 244 "  📋 from clipboard: ${clipsvc:-unrecognised shape}, $(fp "$v"), ${#v} chars"
+
   # CLIPBOARD FIRST. If you already copied the key, the console link, the
   # retrieval steps and the browser prompt are all noise standing between you
   # and done. The value is never printed — you get the provider it looks like,
   # its length and its fingerprint, and nothing else.
-  if [[ -z "${COO_TEST:-}" && -t 0 ]] && command -v pbpaste >/dev/null 2>&1; then
+  elif [[ -z "${COO_TEST:-}" && -t 0 ]] && command -v pbpaste >/dev/null 2>&1; then
     clip=$(pbpaste 2>/dev/null | tr -d '[:space:]')   # no API key contains whitespace
     if (( ${#clip} >= 20 )); then
       clipsvc=$(detect_provider "$clip")
@@ -900,6 +916,10 @@ paste_and_land() {
       # you picked a known provider and pasted a different one's key — that is
       # the wrong-dashboard-row mistake, and it deserves a hard stop.
       c yellow "  ⚠ that looks like a $seen_name key ($(prefix_hint "$seen")), not $svc."
+      if (( CLIP_ONLY )); then
+        c red "  ✗ refusing — nothing stored. copy the right key and run it again."
+        return 1
+      fi
       print -n "     store it as $ref anyway? [y/N] ▸ "
       read -r ans || ans=""
       [[ "$ans" == [yY]* ]] || { c 244 "  nothing stored. grab the right row and run coo again."; return 1 }
@@ -913,7 +933,11 @@ paste_and_land() {
   # "Publishable" is the old anon, "Secret" is the old service_role. Both start
   # sb_ and both resolve to `supabase`, so the generic wrong-provider check above
   # cannot see it. This one can.
-  if [[ "$ref" == supabase/* && "$v" == sb_publishable_* ]]; then
+  # ...unless you explicitly named this ref a publishable/anon one. Some projects
+  # legitimately need the public key in a NEXT_PUBLIC_ var; refusing it there was
+  # the guard assuming every Supabase ref wants the secret.
+  if [[ "$ref" == supabase/* && "$v" == sb_publishable_* \
+        && "${ref:u}" != *PUBLISHABLE* && "${ref:u}" != *ANON* && "${ref:u}" != *PUBLIC* ]]; then
     c red "  ✗ that's the PUBLISHABLE key — Supabase says it's safe to expose, which"
     c red "    is exactly why it can't do server-side work. not stored."
     c 244 "    scroll down to \"Secret keys\" and copy an sb_secret_… value instead."
@@ -1443,7 +1467,9 @@ case "${1:-}" in
   # retrieval guide, clipboard offer, live verify, land in every file — not the
   # bare "paste value:" prompt that only stuffs the keychain.
   add|new)  shift
-            if (( $# == 0 )); then key_flow
+            if [[ " $* " == *" --clipboard "* ]]; then
+              CLIP_ONLY=1; reg_load; paste_and_land "$1"
+            elif (( $# == 0 )); then key_flow
             elif [[ " $* " == *" --stdin "* || ! -t 0 ]]; then cmd_stash "$@"
             else reg_load; paste_and_land "$1" || true; fi ;;
   test)     shift; cmd_check  "$@" ;;
@@ -1459,7 +1485,7 @@ case "${1:-}" in
   check)    shift; cmd_check  "$@" ;;
   nest)     shift; cmd_nest   "$@" ;;
   stash)    shift; cmd_stash  "$@" ;;
-  rotate)   shift; cmd_rotate "$@" ;;
+  rotate)   shift; [[ " $* " == *" --clipboard "* ]] && CLIP_ONLY=1; cmd_rotate "$@" ;;
   remove|rm) shift; cmd_remove "$@" ;;
   site)     shift; cmd_site   "$@" ;;
   fan)      shift; cmd_fan    "$@" ;;
