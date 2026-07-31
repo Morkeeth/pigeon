@@ -30,6 +30,48 @@ mkdir -p "$NEST"
 SITES="$NEST/sites.json"; [[ -f "$SITES" ]] || print '{}' > "$SITES"
 RECENT="$NEST/recent"      # providers you actually reach for, most-recent-first
 
+# ---- terminal protocols we speak, none of which are dependencies -------------
+# Every sequence here is ignored by terminals that don't implement it, so there
+# is no detection, no fallback path, and nothing to install.
+#
+#   2026 — synchronized output. "buffer this frame, paint it in one go." It is
+#          what stops a redraw from being visible as a redraw. Bubble Tea v2 and
+#          Ink v6.7+ adopted it in 2026; Ghostty and iTerm2 implement it.
+#   1049 — alternate screen. The picker becomes a modal that leaves no litter in
+#          your scrollback when it closes.
+#   OSC8 — hyperlinks. A URL stays exactly as readable as before, and becomes
+#          clickable where the terminal supports it.
+SYNC_ON=$'\e[?2026h'; SYNC_OFF=$'\e[?2026l'
+ALT_ON=$'\e[?1049h';  ALT_OFF=$'\e[?1049l'
+CUR_HIDE=$'\e[?25l';  CUR_SHOW=$'\e[?25h'
+osc8() { printf '\e]8;;%s\e\\%s\e]8;;\e\\' "$1" "${2:-$1}"; }
+
+# Raw mode, a hidden cursor and an alternate screen are all things that OUTLIVE
+# the process if it dies holding them. A stranded terminal is a worse bug than
+# anything this tool fixes, so restoring is a trap, not a line at the end of a
+# function that a `break` might skip.
+TTY_DIRTY=0; ALT_ACTIVE=0; STTY_SAVE=""
+tty_grab() {   # $1 = 1 to also take the alternate screen
+  STTY_SAVE=$(stty -g </dev/tty 2>/dev/null) || return 1
+  TTY_DIRTY=1
+  stty -icanon -echo -isig min 1 time 0 </dev/tty
+  if [[ "${1:-0}" == 1 ]]; then ALT_ACTIVE=1; printf '%s' "$ALT_ON" >/dev/tty; fi
+  printf '%s' "$CUR_HIDE" >/dev/tty
+  return 0
+}
+tty_release() {
+  (( TTY_DIRTY )) || return 0
+  printf '%s%s' "$SYNC_OFF" "$CUR_SHOW" >/dev/tty 2>/dev/null
+  (( ALT_ACTIVE )) && printf '%s' "$ALT_OFF" >/dev/tty 2>/dev/null
+  ALT_ACTIVE=0
+  [[ -n "$STTY_SAVE" ]] && stty "$STTY_SAVE" </dev/tty 2>/dev/null
+  TTY_DIRTY=0
+  return 0
+}
+trap 'tty_release' EXIT INT TERM HUP
+# Same visible text as a plain URL, so a terminal without OSC 8 loses nothing.
+url_line() { printf '\e[38;5;244m%s' "$1"; osc8 "$2"; printf '\e[39m\n'; }
+
 c()   { print -P "%F{$1}$2%f"; }
 die() { print -u2 "✗ $*"; exit 1; }
 fp()  { printf '%s' "$1" | shasum | cut -c1-8; }   # identity, never exposure
@@ -238,7 +280,7 @@ prefix_hint() {   # "looks like sk-ant-…" — the visual confirmation before p
 guide_of() {
   local i hint; reg_load
   if [[ "$1" == supabase ]]; then
-    print "1. the browser opens at your Supabase project → Settings → API Keys"
+    print "1. open your Supabase project (link below) → Settings → API Keys"
     print "2. scroll to \"Secret keys\" — NOT \"Publishable key\", that one is safe to expose"
     print "3. click the eye to reveal, then copy the sb_secret_… value"
     print "   (older projects: the \"Legacy anon, service_role\" tab → service_role)"
@@ -246,7 +288,7 @@ guide_of() {
   fi
   i=$(reg_idx "$1") || { print "grab the key from your provider's console, then come back"; return 0 }
   hint=$(prefix_hint "$1")
-  print "1. the browser opens at ${REG_URL[$i]}\n2. create a new key, or copy one you already have"
+  print "1. open your $1 console (link below)\n2. create a new key, or copy one you already have"
   [[ -n "$hint" ]] && print "3. copy the value — it starts with $hint"
 }
 
@@ -270,10 +312,9 @@ pick_provider() {
   reg_load; PICKED=""
   local tty=/dev/tty
   [[ -r "$tty" && -w "$tty" ]] || { pick_numbered; return $? }
-  local stty_save; stty_save=$(stty -g <"$tty" 2>/dev/null) || { pick_numbered; return $? }
-  # -isig: Ctrl-C arrives as a byte we handle, so the terminal is ALWAYS restored
-  stty -icanon -echo -isig min 1 time 0 <"$tty"
-  printf '\e[?25l' >"$tty"
+  # The picker is a modal: it owns the screen while open and gives it back
+  # untouched. Same shape as the Nous Hermes TUI's overlays.
+  tty_grab 1 || { pick_numbered; return $? }
 
   local filter="" ch rest sel=1 i n shown drawn=0 ret=1 idx mark hint
   local -a rows frame
@@ -311,8 +352,14 @@ pick_provider() {
       frame+=( "    ＋ custom %F{244}— name it yourself (anything not listed)%f" )
     fi
 
-    (( drawn > 0 )) && printf '\e[%dA\e[J' "$drawn" >"$tty"
-    for i in {1..${#frame}}; do print -P -- "${frame[$i]}" >"$tty"; done
+    # One atomic frame. Without this the move-up-and-reprint is visible as a
+    # flash on every keystroke, which is what makes hand-rolled TUIs feel cheap.
+    {
+      printf '%s' "$SYNC_ON"
+      (( drawn > 0 )) && printf '\e[%dA\e[J' "$drawn"
+      for i in {1..${#frame}}; do print -P -- "${frame[$i]}"; done
+      printf '%s' "$SYNC_OFF"
+    } >"$tty"
     drawn=${#frame}
 
     ch=""; read -k 1 ch <"$tty" || break
@@ -334,9 +381,16 @@ pick_provider() {
     esac
   done
 
-  printf '\e[%dA\e[J\e[?25h' "$drawn" >"$tty"
-  stty "$stty_save" <"$tty" 2>/dev/null || true
-  [[ $ret -eq 0 && "$PICKED" != custom ]] && reg_bump "$PICKED"
+  # Erase first (covers terminals with no alt screen), then hand the screen back.
+  printf '\e[%dA\e[J' "$drawn" >"$tty"
+  tty_release
+  if (( ret == 0 )); then
+    # A modal leaves no trace, so say out loud what was chosen.
+    local pi pname="custom"
+    [[ "$PICKED" != custom ]] && { pi=$(reg_idx "$PICKED") && pname="${REG_DISP[$pi]}" }
+    c cyan "  ▸ $pname"
+    [[ "$PICKED" != custom ]] && reg_bump "$PICKED"
+  fi
   return $ret
 }
 
@@ -364,12 +418,10 @@ menu() {          # menu "title" "key|label|hint" ...
   local title="$1"; shift
   local -a items; items=("$@")
   MENU_PICK=""
-  local tty=/dev/tty stty_save
-  if [[ ! -r "$tty" || ! -w "$tty" ]] || ! stty_save=$(stty -g <"$tty" 2>/dev/null); then
+  local tty=/dev/tty
+  if [[ ! -r "$tty" || ! -w "$tty" ]] || ! tty_grab 0; then
     menu_numbered "$title" "$@"; return $?
   fi
-  stty -icanon -echo -isig min 1 time 0 <"$tty"
-  printf '\e[?25l' >"$tty"
   local sel=1 n=${#items} i ch rest drawn=0 ret=1 k rest2 lbl hint
   local -a frame
   while true; do
@@ -383,8 +435,12 @@ menu() {          # menu "title" "key|label|hint" ...
       fi
     done
     frame+=( "  %F{244}↑↓ move · ⏎ take · or just press the letter%f" )
-    (( drawn > 0 )) && printf '\e[%dA\e[J' "$drawn" >"$tty"
-    for i in {1..${#frame}}; do print -P -- "${frame[$i]}" >"$tty"; done
+    {
+      printf '%s' "$SYNC_ON"
+      (( drawn > 0 )) && printf '\e[%dA\e[J' "$drawn"
+      for i in {1..${#frame}}; do print -P -- "${frame[$i]}"; done
+      printf '%s' "$SYNC_OFF"
+    } >"$tty"
     drawn=${#frame}
 
     ch=""; read -k 1 ch <"$tty" || break
@@ -403,8 +459,8 @@ menu() {          # menu "title" "key|label|hint" ...
          done ;;
     esac
   done
-  printf '\e[%dA\e[J\e[?25h' "$drawn" >"$tty"
-  stty "$stty_save" <"$tty" 2>/dev/null || true
+  printf '\e[%dA\e[J' "$drawn" >"$tty"
+  tty_release
   return $ret
 }
 menu_numbered() {
@@ -796,11 +852,11 @@ paste_and_land() {
   # Show the link; open it only if asked.
   local ob
   if [[ -n "$url" ]]; then
-    c 244 "    $url"
+    url_line "    " "$url"          # clickable where supported, plain text where not
     if [[ -z "${COO_TEST:-}" && -t 0 ]]; then
-      print -n "    open that? [y/N] ▸ "
+      print -n "    ⌘-click it above, or press o to open ▸ "
       read -r ob || ob=""
-      [[ "${ob:l}" == y* ]] && { open "$url" >/dev/null 2>&1 || true; }
+      [[ "${ob:l}" == o* || "${ob:l}" == y* ]] && { open "$url" >/dev/null 2>&1 || true; }
     fi
   fi
   print -n "  paste it here (hidden, Enter to cancel) ▸ "
@@ -871,7 +927,7 @@ cmd_rotate() {
   local url; url=$(console_of "${ref%%/*}")
   print ""
   c yellow "  one step left, and only you can do it: REVOKE the old key ($oldfp)."
-  [[ -n "$url" ]] && print "    $url"
+  [[ -n "$url" ]] && url_line "    " "$url"
   c 244 "  pigeon deliberately never revokes for you — a wrong guess there takes prod down."
   return 0
 }
@@ -1221,11 +1277,29 @@ for x in d.get(os.environ['REF'], []):
     while IFS=$'\t' read -r vcwd vvar venv; do
       [[ -z "$vcwd" ]] && continue
       c cyan "  vercel: $vvar → $venv (${vcwd/#$HOME/~})…"
-      if (cd "$vcwd" && { npx vercel env rm "$vvar" "$venv" --yes >/dev/null 2>&1 || true; } \
-            && printf '%s' "$can" | npx vercel env add "$vvar" "$venv" >/dev/null 2>&1); then
-        c green "  ✓ vercel env $vvar ($venv) updated — redeploy to make it live"
+      # Vercel CLI >= 55 turns on --non-interactive by itself "when an agent is
+      # detected", and then ignores piped stdin — storing an EMPTY value while
+      # exiting 0. Piping a secret in was therefore a silent way to blank a
+      # production variable. --value is the sanctioned non-interactive path.
+      # It does put the secret in argv (visible to `ps` for the length of the
+      # call); that is the lesser evil against blanking prod and reporting ✓.
+      # </dev/null matters: this loop reads from a here-string, so npx would
+      # inherit the REST of that here-string as its stdin and misbehave.
+      # No `env rm` first — --force overwrites, and a remove-then-failed-add
+      # leaves production with no variable at all.
+      if (cd "$vcwd" \
+            && npx vercel env add "$vvar" "$venv" --value "$can" --force </dev/null >/dev/null 2>&1); then
+        # Vercel marks Production variables sensitive, i.e. write-only: `env pull`
+        # returns an empty string for them. So confirm PRESENCE and say plainly
+        # that the value itself was not read back. Never claim a check we skipped.
+        if (cd "$vcwd" && npx vercel env ls "$venv" </dev/null 2>/dev/null | grep -qE "^ *${vvar} "); then
+          c green "  ✓ vercel env $vvar ($venv) set — redeploy to make it live"
+          c 244   "    value not read back: Vercel marks it sensitive (write-only)"
+        else
+          c red "  ✗ vercel took the write but $vvar is not listed — check it by hand."
+        fi
       else
-        c red "  ✗ vercel update failed. manual: cd ${vcwd/#$HOME/~} && npx vercel env add $vvar $venv"
+        c red "  ✗ vercel update failed. manual: cd ${vcwd/#$HOME/~} && npx vercel env add $vvar $venv --value ..."
       fi
     done <<< "$vsites"
   elif [[ $had_files -eq 0 ]]; then
