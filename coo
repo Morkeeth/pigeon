@@ -38,27 +38,27 @@ usage() {
   cat <<'EOF'
 🐦 pigeon — gather, check and rotate API keys across your agent fleet
 
-  coo                      pick a key (type to filter 60 providers) → paste once → it lands
-                           in every file on this machine that already holds one
-  coo doctor               probe every key found on this machine, fix the broken ones
-  coo install              put coo on your PATH (run once, then just type coo)
-  coo gather               find every key on this machine, flag stale copies
-  coo check [service]      ask each provider if the key still works
-  coo nest                 list what's gathered (names only)
-  coo stash <ref>          paste one key into the nest (hidden)
-  coo rotate <ref>         paste a new value, verify live, land it, revoke the old
-  coo remove <ref>         delete a key from the nest
-  coo fan <ref>            push the stored value to every declared home
-  coo site <ref> <path> <VAR>   declare a home by hand (coo usually does this for you)
+  coo          ← that's it. that's the tool. run it and everything happens there.
+
+you never need anything below. they are shortcuts into the same flow:
+
+  coo add            skip the menu, go straight to adding a key
+  coo test           ask every provider: are my keys still alive?
+  coo keys           list what you've got (names only, never values)
+  coo scan           find keys scattered across this machine
+  coo rotate <ref>   replace a key everywhere, then revoke the old one
+  coo delete <ref>   remove a key
+  coo fix            probe everything on this machine and repair what's broken
+  coo install        put coo on your PATH
 
 for scripts and agents:
-  coo check --json         {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
-  coo nest --json          the refs, as a JSON array
-  printf %s "$K" | coo stash <ref> --stdin      store without a terminal
-  exit codes: check → 0 nothing dead, 1 something dead
+  coo test --json                          {alive, dead, unverified, keys:[…]}
+  coo keys --json                          the refs, as a JSON array
+  printf %s "$K" | coo add <ref> --stdin   store one, no terminal needed
+  exit codes: coo test → 0 nothing dead, 1 something dead
 
-a "ref" is service/NAME, e.g. openrouter/API_KEY. values are never printed.
-lost? just type coo — it will tell you what's broken and fix it with you.
+a <ref> is service/NAME, e.g. openrouter/API_KEY. values are never printed.
+(check/nest/gather/stash/remove/doctor still work — same commands, older names.)
 EOF
 }
 
@@ -92,7 +92,7 @@ REGISTRY='
 openai|OpenAI|1|sk-proj-,sk-svcacct-|OPENAI_API_KEY|API_KEY|https://platform.openai.com/api-keys
 anthropic|Anthropic|1|sk-ant-|ANTHROPIC_API_KEY|API_KEY|https://console.anthropic.com/settings/keys
 openrouter|OpenRouter|1|sk-or-v1-|OPENROUTER_API_KEY|API_KEY|https://openrouter.ai/settings/keys
-supabase|Supabase|1|sb_secret_,sb_publishable_|SUPABASE_SERVICE_ROLE_KEY|SERVICE_KEY|https://supabase.com/dashboard/project/_/settings/api-keys
+supabase|Supabase|1|sb_secret_,sb_publishable_|SUPABASE_SERVICE_ROLE_KEY|SERVICE_KEY|https://supabase.com/dashboard/projects
 github|GitHub|1|ghp_,gho_,ghu_,ghs_,ghr_,github_pat_|GITHUB_TOKEN|TOKEN|https://github.com/settings/tokens
 google|Google AI Studio (Gemini)|2|AIza|GOOGLE_API_KEY|API_KEY|https://aistudio.google.com/apikey
 vercel|Vercel|2||VERCEL_TOKEN|TOKEN|https://vercel.com/account/settings/tokens
@@ -150,6 +150,16 @@ deepgram|Deepgram|5||DEEPGRAM_API_KEY|API_KEY|https://console.deepgram.com
 doppler|Doppler|5|dp.pt.,dp.st.,dp.sa.|DOPPLER_TOKEN|TOKEN|https://dashboard.doppler.com
 okx|OKX|5||OKX_API_KEY|API_KEY|https://www.okx.com/account/my-api
 '
+
+# ONE account → one key, so every copy should be byte-identical and a differing
+# copy is stale and safe to overwrite. Everything NOT on this list is treated as
+# PER-PROJECT — Supabase, Vercel, Clerk, Neon, Stripe test/live — where two
+# different values are two different projects, and "fixing the stale one" means
+# breaking a working project. Absent from this list means never bulk-write.
+# (Learned the hard way on 2026-07-31: a taste-machine Supabase key was written
+# over litmus's, in litmus's own .env.)
+ACCOUNT_SCOPED=" openrouter anthropic openai github groq xai mistral deepseek perplexity huggingface replicate together fireworks cohere elevenlabs tavily exa firecrawl brave serper langsmith wandb assemblyai deepgram "
+is_account_scoped() { [[ "$ACCOUNT_SCOPED" == *" $1 "* ]] }
 
 typeset -ga REG_IDS REG_DISP REG_RANK REG_PRE REG_ENV REG_REF REG_URL REG_ORDER
 reg_load() {
@@ -213,7 +223,7 @@ service_of() {
 console_of() {
   local i; reg_load
   i=$(reg_idx "$1") && { print -r -- "${REG_URL[$i]}"; return 0 }
-  [[ "$1" == jwt ]] && print "https://supabase.com/dashboard/project/_/settings/api-keys" || print ""
+  [[ "$1" == jwt ]] && print "https://supabase.com/dashboard/projects" || print ""
 }
 prefix_hint() {   # "looks like sk-ant-…" — the visual confirmation before pasting
   local i; reg_load
@@ -228,7 +238,10 @@ prefix_hint() {   # "looks like sk-ant-…" — the visual confirmation before p
 guide_of() {
   local i hint; reg_load
   if [[ "$1" == supabase ]]; then
-    print "1. the browser opens at your supabase dashboard → pick the project\n2. Settings → API keys\n3. Reveal + copy the SERVICE_ROLE key — the secret one, NOT anon"
+    print "1. the browser opens at your Supabase project → Settings → API Keys"
+    print "2. scroll to \"Secret keys\" — NOT \"Publishable key\", that one is safe to expose"
+    print "3. click the eye to reveal, then copy the sb_secret_… value"
+    print "   (older projects: the \"Legacy anon, service_role\" tab → service_role)"
     return 0
   fi
   i=$(reg_idx "$1") || { print "grab the key from your provider's console, then come back"; return 0 }
@@ -343,6 +356,76 @@ pick_numbered() {
   PICKED="${REG_IDS[${REG_ORDER[$a]}]}"; reg_bump "$PICKED"; return 0
 }
 
+# ---- menu: the same arrow-key feel as the picker, for the short lists -------
+# Pressing ↑↓ at the main menu used to echo ^[[A^[[B and scold you. If one list
+# in this tool takes arrows, every list takes arrows. Letters still work.
+MENU_PICK=""
+menu() {          # menu "title" "key|label|hint" ...
+  local title="$1"; shift
+  local -a items; items=("$@")
+  MENU_PICK=""
+  local tty=/dev/tty stty_save
+  if [[ ! -r "$tty" || ! -w "$tty" ]] || ! stty_save=$(stty -g <"$tty" 2>/dev/null); then
+    menu_numbered "$title" "$@"; return $?
+  fi
+  stty -icanon -echo -isig min 1 time 0 <"$tty"
+  printf '\e[?25l' >"$tty"
+  local sel=1 n=${#items} i ch rest drawn=0 ret=1 k rest2 lbl hint
+  local -a frame
+  while true; do
+    frame=( "  $title" )
+    for i in {1..$n}; do
+      k="${items[$i]%%|*}"; rest2="${items[$i]#*|}"; lbl="${rest2%%|*}"; hint="${rest2#*|}"
+      if (( i == sel )); then
+        frame+=( "  %F{cyan}❯%f $k) %B$(printf '%-16s' "$lbl")%b %F{244}${hint}%f" )
+      else
+        frame+=( "    $k) $(printf '%-16s' "$lbl") %F{244}${hint}%f" )
+      fi
+    done
+    frame+=( "  %F{244}↑↓ move · ⏎ take · or just press the letter%f" )
+    (( drawn > 0 )) && printf '\e[%dA\e[J' "$drawn" >"$tty"
+    for i in {1..${#frame}}; do print -P -- "${frame[$i]}" >"$tty"; done
+    drawn=${#frame}
+
+    ch=""; read -k 1 ch <"$tty" || break
+    case "$ch" in
+      $'\n'|$'\r') MENU_PICK="${items[$sel]%%|*}"; ret=0; break ;;
+      $'\x03') ret=1; break ;;
+      $'\e')
+        rest=""; read -t 0.06 -k 2 rest <"$tty" 2>/dev/null || rest=""
+        case "$rest" in
+          '[A') (( sel-- )); (( sel < 1 )) && sel=$n ;;
+          '[B') (( sel++ )); (( sel > n )) && sel=1 ;;
+          '')   ret=1; break ;;
+        esac ;;
+      *) for i in {1..$n}; do
+           [[ "${items[$i]%%|*}" == "${ch:l}" ]] && { MENU_PICK="${ch:l}"; ret=0; break 2 }
+         done ;;
+    esac
+  done
+  printf '\e[%dA\e[J\e[?25h' "$drawn" >"$tty"
+  stty "$stty_save" <"$tty" 2>/dev/null || true
+  return $ret
+}
+menu_numbered() {
+  local title="$1"; shift
+  local -a items; items=("$@")
+  MENU_PICK=""
+  local i k rest2 lbl hint a
+  print "  $title"
+  for i in {1..${#items}}; do
+    k="${items[$i]%%|*}"; rest2="${items[$i]#*|}"; lbl="${rest2%%|*}"; hint="${rest2#*|}"
+    printf "    %s) %-16s %s\n" "$k" "$lbl" "$hint"
+  done
+  print -n "  ▸ "
+  read -r a || return 1
+  [[ -z "$a" ]] && return 1
+  for i in {1..${#items}}; do
+    [[ "${items[$i]%%|*}" == "${a:l}" ]] && { MENU_PICK="${a:l}"; return 0 }
+  done
+  return 1
+}
+
 # ---- ask the provider: is this key alive? -----------------------------------
 # returns "VERDICT|detail". the whole point of pigeon: a key that exists, parses,
 # and is WRONG is the failure that kills agents silently.
@@ -425,12 +508,11 @@ cmd_gather() {
   # should be byte-identical. Per-project keys (a Vercel OIDC token, a Supabase
   # anon key, an EVM wallet key) are SUPPOSED to differ; flagging them is the
   # kind of false red that makes a tool feel dumb on first run.
-  local account_scoped=" openrouter anthropic openai github "
   local divergent=0 s n_fp
   while IFS= read -r s; do
     [[ -z "$s" ]] && continue
     n_fp=$(awk -F'\t' -v s="$s" '$1==s{print $2}' "$tmp" | sort -u | grep -c .)
-    if [[ "$n_fp" -gt 1 && "$account_scoped" == *" $s "* ]]; then
+    if [[ "$n_fp" -gt 1 ]] && is_account_scoped "$s"; then
       c red "  ▲ $s — $n_fp DIFFERENT values for ONE account. one of these is stale."
       divergent=$((divergent+1))
       awk -F'\t' -v s="$s" '$1==s{printf "      %s  %-30s %s\n",$2,$3,$4}' "$tmp" | sort -u
@@ -614,13 +696,22 @@ land_it() {
     hp+=("$p"); hv+=("$n"); hs+=("$s"); hf+=("$g")
   done <<< "$homes"
 
+  # A per-project key's "other copies" are OTHER PROJECTS. Never offer to
+  # overwrite them — that is not fixing drift, that is breaking someone's app.
   local stale=0
-  (( ${#hp} > 0 )) && for i in {1..${#hp}}; do
-    [[ "${hs[$i]}" == stale ]] && ! is_shell_profile "${hp[$i]}" && (( ++stale ))
-  done
+  if is_account_scoped "$id"; then
+    (( ${#hp} > 0 )) && for i in {1..${#hp}}; do
+      [[ "${hs[$i]}" == stale ]] && ! is_shell_profile "${hp[$i]}" && (( ++stale ))
+    done
+  fi
 
   if (( ${#hp} > 0 )); then
-    print ""; c cyan "🐦 this key already lives in ${#hp} place(s) on this machine:"
+    print ""
+    if is_account_scoped "$id"; then
+      c cyan "🐦 this key already lives in ${#hp} place(s) on this machine:"
+    else
+      c cyan "🐦 other $id keys on this machine (NOT touched):"
+    fi
     for i in {1..${#hp}}; do
       local tag warn=""
       is_shell_profile "${hp[$i]}" && warn=" %F{yellow}⚠ shell profile%f"
@@ -628,6 +719,11 @@ land_it() {
       else tag="%F{red}stale (${hf[$i]})%f"; fi
       print -P -- "     $(printf '%2d' $i)  $(printf '%-34s %-26s' "${hp[$i]/#$HOME/~}" "${hv[$i]}") $tag$warn"
     done
+    if ! is_account_scoped "$id"; then
+      c yellow "  ↑ $id keys are PER-PROJECT. A different value there is a different"
+      c yellow "    project, not a stale copy — overwriting it would break that project."
+      c 244    "    only the homes declared for $ref were written. to add one: pick s) site."
+    fi
   fi
 
   # non-interactive: report, never act.
@@ -671,6 +767,13 @@ land_it() {
   local np nv
   read -r np || np=""
   [[ -z "$np" ]] && { c green "  ✓ done — $ref is in your nest$( (( ${#hp} + n_sites > 0 )) && print -n " and its files")."; return 0 }
+  # A pasted key here would become a FILENAME — a secret written into your
+  # directory listing. Refuse anything that looks like a key rather than a path.
+  if [[ -n "$(detect_provider "$np")" || "$np" != *[/.]* ]]; then
+    c red "  ✗ that looks like a key, not a file path — nothing created."
+    c 244 "     this prompt wants something like ~/CODE/myapp/.env"
+    return 0
+  fi
   np="${np/#\~/$HOME}"
   print -n "  variable name in that file${envvar:+ [$envvar]} ▸ "
   read -r nv || nv=""
@@ -689,9 +792,16 @@ paste_and_land() {
   local url; url=$(console_of "$svc")
   print ""; c cyan "  $svc — how to grab it:"
   guide_of "$svc" | sed 's/^/    /'
-  if [[ -n "$url" && -z "${COO_TEST:-}" ]]; then
-    open "$url" >/dev/null 2>&1 || true
-    c 244 "    (browser opened: $url)"
+  # Hijacking the browser unasked is rude, and the tab is often the wrong one.
+  # Show the link; open it only if asked.
+  local ob
+  if [[ -n "$url" ]]; then
+    c 244 "    $url"
+    if [[ -z "${COO_TEST:-}" && -t 0 ]]; then
+      print -n "    open that? [y/N] ▸ "
+      read -r ob || ob=""
+      [[ "${ob:l}" == y* ]] && { open "$url" >/dev/null 2>&1 || true; }
+    fi
   fi
   print -n "  paste it here (hidden, Enter to cancel) ▸ "
   local v; read -rs v || true; print ""
@@ -714,6 +824,17 @@ paste_and_land() {
       # you named this yourself, so you meant it — just say what we can see.
       c 244 "  (looks like a $seen_name key — storing it as $ref, your name wins.)"
     fi
+  fi
+
+  # Supabase's new API-keys page renamed the trap rather than removing it:
+  # "Publishable" is the old anon, "Secret" is the old service_role. Both start
+  # sb_ and both resolve to `supabase`, so the generic wrong-provider check above
+  # cannot see it. This one can.
+  if [[ "$ref" == supabase/* && "$v" == sb_publishable_* ]]; then
+    c red "  ✗ that's the PUBLISHABLE key — Supabase says it's safe to expose, which"
+    c red "    is exactly why it can't do server-side work. not stored."
+    c 244 "    scroll down to \"Secret keys\" and copy an sb_secret_… value instead."
+    return 1
   fi
 
   # supabase wants the SERVICE_ROLE key specifically; catch the classic wrong-row copy.
@@ -772,15 +893,14 @@ key_actions() {
   local ref="$1" id="${1%%/*}" a sp sv2 def i
   while true; do
     print ""
-    c cyan "  $ref — already in the nest"
-    print "    r) rotate   paste a new value, verify it live, push it everywhere"
-    print "    c) check    ask the provider right now: alive, dead, drained?"
-    print "    f) fan      push the stored value to its declared homes"
-    print "    s) site     declare another file + variable this key must live in"
-    print "    d) delete   remove it from the nest"
-    print "    b) back"
-    print -n "  ▸ "
-    read -r a || return 0
+    menu "$ref — already in the nest" \
+      "r|rotate|paste a new value, verify it live, push it everywhere" \
+      "c|check|ask the provider right now: alive, dead, drained?" \
+      "f|fan|push the stored value to its declared homes" \
+      "s|site|declare another file + variable this key must live in" \
+      "d|delete|remove it from the nest" \
+      "b|back|" || return 0
+    a="$MENU_PICK"
     case "$a" in
       r) cmd_rotate "$ref" || true; return 0 ;;
       c) print ""; cmd_check "$ref" || true ;;
@@ -791,26 +911,34 @@ key_actions() {
          [[ -z "$sv2" ]] && sv2="$def"
          if [[ -n "$sp" && -n "$sv2" ]]; then cmd_site "$ref" "$sp" "$sv2" || true; else c 244 "  skipped."; fi ;;
       d) cmd_remove "$ref" || true; return 0 ;;
-      b|B|"") return 0 ;;
-      *) c 244 "  r, c, f, s, d or b." ;;
+      b|"") return 0 ;;
     esac
   done
 }
 
 key_flow() {
-  pick_provider || return 0
-  local id="$PICKED" ref
-  if [[ "$id" == custom ]]; then
+  # Loops on purpose: nobody adds exactly one key. Finishing one drops you
+  # straight back into the picker instead of a menu you have to re-read.
+  local id ref again
+  while true; do
+    pick_provider || return 0
+    id="$PICKED"
+    if [[ "$id" == custom ]]; then
+      print ""
+      print "  name it. \"service/NAME\" — the service groups it, the NAME is yours."
+      print -n "  e.g. stripe/WEBHOOK_SECRET ▸ "
+      read -r ref || return 0
+      [[ -n "$ref" ]] || { c 244 "  nothing named."; return 0 }
+      [[ "$ref" == */* ]] || ref="custom/$ref"
+    else
+      ref=$(ref_of "$id")
+    fi
+    if in_nest "$ref"; then key_actions "$ref"; else paste_and_land "$ref" || true; fi
     print ""
-    print "  name it. \"service/NAME\" — the service groups it, the NAME is yours."
-    print -n "  e.g. stripe/WEBHOOK_SECRET ▸ "
-    read -r ref || return 0
-    [[ -n "$ref" ]] || { c 244 "  nothing named."; return 0 }
-    [[ "$ref" == */* ]] || ref="custom/$ref"
-  else
-    ref=$(ref_of "$id")
-  fi
-  if in_nest "$ref"; then key_actions "$ref"; else paste_and_land "$ref" || true; fi
+    print -n "  add another key? [Y/n] ▸ "
+    read -r again || return 0
+    [[ "${again:l}" == n* ]] && return 0
+  done
 }
 
 # ---- the wizard: what bare `coo` runs. zero args, zero memorizing. -----------
@@ -840,19 +968,17 @@ cmd_wizard() {
   local choice p ref   # hoisted: re-declaring these each pass echoed them back
   while true; do
     print ""
-    print "  what do you want to do?"
-    print "    1) add or fix a key   pick from 60 providers, paste once, it lands in every file"
-    print "    2) check my keys      ask each provider: alive, dead, drained?"
-    print "    3) find keys          scan this machine for scattered and stale copies"
-    print "    q) quit"
-    print -n "  ▸ "
-    read -r choice || return 0
+    menu "what do you want to do?" \
+      "1|add or fix a key|pick from 60 providers, paste once, it lands" \
+      "2|check my keys|ask each provider: alive, dead, drained?" \
+      "3|find keys|scan this machine for scattered and stale copies" \
+      "q|quit|" || return 0
+    choice="$MENU_PICK"
     case "$choice" in
       1) key_flow || true ;;
       2) print ""; cmd_check || true ;;
       3) print ""; cmd_gather || true ;;
-      q|Q|"") return 0 ;;
-      *) c 244 "  1, 2, 3 or q." ;;
+      q|"") return 0 ;;
     esac
   done
 }
@@ -1027,6 +1153,10 @@ sites = [x for x in d.get(ref, []) if x.get('type') != 'vercel']
 if not sites:
     print("NOSITES"); sys.exit(0)
 w=s=m=0
+# Two declared vars in ONE file means two passes over that file. Backing up on
+# each pass overwrites the pristine backup with the already-modified file and
+# the original is gone forever. Back up once per file per run.
+backed = set()
 for site in sites:
     p, var = site['path'], site['var']
     try:
@@ -1052,7 +1182,9 @@ for site in sites:
         out.append(f'{var}={can}\n'); changed = True
         print(f"WROTE\t{p}\t(added {var})")
     if changed:
-        shutil.copy2(p, p + '.bak-pigeon')     # always reversible
+        if p not in backed:
+            shutil.copy2(p, p + '.bak-pigeon')     # always reversible
+            backed.add(p)
         open(p, 'w').writelines(out); w+=1
     elif found:
         print(f"SAME\t{p}\talready canonical"); s+=1
@@ -1109,6 +1241,13 @@ reg_load
 
 case "${1:-}" in
   ""|setup) cmd_wizard ;;
+  # plain-English names first; the older ones still work so nothing breaks.
+  add|new)  shift; if (( $# )); then cmd_stash "$@"; else key_flow; fi ;;
+  test)     shift; cmd_check  "$@" ;;
+  keys)     shift; cmd_nest   "$@" ;;
+  scan)     shift; cmd_gather "$@" ;;
+  delete)   shift; cmd_remove "$@" ;;
+  fix)      cmd_setup ;;
   doctor)   cmd_setup ;;
   install)  cmd_install ;;
   gather)   shift; cmd_gather "$@" ;;
