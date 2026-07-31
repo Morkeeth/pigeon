@@ -1,18 +1,17 @@
 # 🐦 pigeon
 
-**Gather, check, and rotate API keys across your agent fleet.** One command finds every key scattered across your machine and tells you which ones are already dead.
-
-A carrier pigeon for your API keys. It gathers them, checks them, and keeps them alive.
+**Keep the API keys of an agent fleet alive.** One command finds every key scattered across your machine, asks each provider which ones are already dead, and lands a fresh one everywhere it belongs.
 
 ```
-$ coo check
+$ coo test
 🐦 asking each provider if the key still works…
 
-  anthropic/API_KEY      DEAD    anthropic rejected
-  openrouter/API_KEY     LOW     only $2.14 left
-  supabase/SERVICE_KEY   ALIVE   jwt role=anon
+  anthropic/API_KEY      ALIVE     anthropic
+  openrouter/API_KEY     LOW       only $2.14 left
+  litmus/SUPABASE_KEY    DEAD      supabase says invalid (HTTP 401)
+  taste-machine/APP_PW   UNKNOWN   no probe for this shape
 
-  2 alive · 1 dead · 0 unverified
+  2 alive · 1 dead · 1 unverified
   a dead key that still sits in a config is an agent that fails silently.
 ```
 
@@ -28,44 +27,52 @@ Every secrets manager on the market solves *storage*. None of them answer the qu
 
 They also all charge **per human seat**. Your "team" is five agents and zero humans. pigeon is free, local, and priced for fleets, not seats.
 
-## What it does
+## Use it
 
 ```
-coo                 the picker: type to filter 60 providers, then add/rotate/fan/remove
-coo gather          find every key scattered across your machine, flag divergence
-coo check           ask each provider: alive? dead? drained? wrong role?
-coo nest            list what you've gathered (names only, never values)
-coo stash <ref>     paste one key into the nest (hidden)
-coo rotate <ref>    paste a new value, verify it live, fan it, revoke the old
-coo remove <ref>    delete a key from the nest
-coo fan <ref>       push the canonical value everywhere it should live
-coo site <ref> --vercel <dir> <VAR> [env]   also push it to Vercel env
+coo                          the whole tool. run it, everything happens there.
 ```
 
-`coo gather` is the one you run first. It reads your `~/CODE/*/.env`, your shell profile, your agent auth stores, and shows you the mess you didn't know you had — grouped by service, with **divergence flagged**: the same account key wearing three different values across three repos means two of them are stale.
+That's the interface. The rest are shortcuts into the same flow:
 
-`coo check` is the one that makes people share a screenshot. It asks each provider directly — not the file, the provider — so a key that exists, parses, and is *wrong* gets caught. That's the failure storage tools can't see.
+```
+coo add                      skip the menu, go straight to adding a key
+coo test                     ask every provider: are my keys still alive?
+coo keys                     list what you've got (names only, never values)
+coo scan                     find keys scattered across this machine
+coo rotate <ref>             replace a key everywhere, then revoke the old one
+coo push <ref> [--redeploy]  re-send a stored key to its files and Vercel env
+coo pending                  what still needs a human paste
+coo delete <ref>             remove a key
+```
 
-Bare `coo` is the one you actually use. It opens a picker over 60 providers that
-filters as you type — `ant` is enough to land on Anthropic — marks the ones
-already in your nest, and remembers what you reached for last. Take one and you
-get its retrieval steps, its console opened in your browser, and a hidden paste.
+A `<ref>` is `service/NAME` — `openrouter/API_KEY`, `stripe/WEBHOOK_SECRET`.
+The older names (`check`, `nest`, `gather`, `stash`, `fan`, `remove`) still work.
 
-Then the part that saves you: **pigeon reads the value's prefix and names it.**
-Paste an `sk-or-v1-…` into the OpenAI slot and it stops you — *"that looks like
-an OpenRouter key, not openai"* — before it stores anything. Same catch that
-saves you from copying Supabase's `anon` row when you wanted `service_role`,
-generalised to every provider in the table. Nothing you paste is ever echoed.
+### Pick
 
-No fzf, no config, no deps — it's raw zsh against `/dev/tty`, and it degrades to
-a plain numbered list wherever there's no terminal.
+Bare `coo` opens a picker over 60 providers that filters as you type — `ant` is enough to land on Anthropic. It marks what's already in your nest, floats what you reached for last, and runs as a modal that leaves nothing in your scrollback.
 
-### Then it actually lands
+No fzf, no config, no dependencies — raw zsh against `/dev/tty`, speaking synchronized output (DEC 2026), the alternate screen and OSC 8 hyperlinks. Terminals that don't implement those ignore them, and it degrades to a plain numbered list where there's no TTY at all.
 
-A vault stores your key. pigeon **puts it where it belongs**, in the same breath
-as the paste. The moment a value is verified, pigeon goes looking for every copy
-already on your machine — matching on the value's *shape*, not the variable
-name, because the fourth copy is always the one somebody called `OR_KEY` at 2am:
+### Paste — or don't
+
+If the key is already on your clipboard, that *is* the paste:
+
+```
+📋 your clipboard holds a stripe key — ffa6fa48, 34 chars
+use it for stripe/SECRET_KEY? [Y/n] ▸
+```
+
+One keypress. The value is never printed — you get the provider it looks like, its length and its fingerprint. The retrieval steps and console link only appear when the clipboard has nothing usable, so they stop being a toll booth.
+
+**pigeon names a value from its prefix.** Paste an `sk-or-v1-…` into the OpenAI slot and it stops you — *"that looks like an OpenRouter key, not openai"* — before storing anything. Same catch that saves you from Supabase's publishable row when you wanted a secret key, generalised to every provider in the table.
+
+Copied it out of a terminal and dragged your shell prompt along? It trims the prompt and tells you. Anything non-ASCII left over is refused outright — macOS re-encodes such values in the Keychain, which would silently store bytes you never pasted.
+
+### Then it lands
+
+A vault stores your key. pigeon **puts it where it belongs**, in the same breath as the paste. The moment a value is verified it looks for every copy already on your machine — matching the value's *shape*, not the variable name, because the fourth copy is always the one somebody called `OR_KEY` at 2am:
 
 ```
 🐦 this key already lives in 3 place(s) on this machine:
@@ -76,32 +83,60 @@ name, because the fourth copy is always the one somebody called `OR_KEY` at 2am:
 overwrite the 2 stale copy(ies) with what you just pasted? [Y/n/p=pick] ▸
 ```
 
-One keystroke and the stale copies are gone. Every changed file is backed up as
-`<file>.bak-pigeon` first, and **shell profiles are never bulk-written** — a
-`.zshrc` is a bigger deal than a `.env`, so it needs `p` and an explicit yes.
+Every changed file is backed up as `<file>.bak-pigeon` first, and **shell profiles are never bulk-written** — a `.zshrc` is a bigger deal than a `.env`, so it needs `p` and an explicit yes.
 
-That is the whole bug pigeon was built for, closed in one prompt: you pasted
-once, and there is no stale fourth copy left to kill an agent next Tuesday.
+### Account keys vs project keys — the rule that matters
 
-### For agents
+**pigeon only offers to overwrite copies of a key that is one-per-account.** OpenRouter, Anthropic, OpenAI, GitHub and friends: one account, one key, so a differing copy is stale and worth fixing.
 
-Your fleet has no hands, so nothing here needs a terminal:
+Supabase, Vercel, Clerk, Neon, Stripe test/live and anything not on that list are **per-project**. A different value there is a *different project*, not a stale copy, and overwriting it breaks that project. Those are listed and left alone:
 
-```bash
-coo check --json     # {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
-coo nest --json      # the refs, as a JSON array
-printf %s "$KEY" | coo stash openrouter/API_KEY --stdin
+```
+🐦 other supabase keys on this machine (NOT touched):
+      1  ~/CODE/litmus/.env   SUPABASE_SECRET_KEY   stale (248b772b)
+  ↑ supabase keys are PER-PROJECT. A different value there is a different
+    project, not a stale copy — overwriting it would break that project.
 ```
 
-`coo check` exits `0` when nothing is dead and `1` when something is — so
-`coo check || alert` is the whole monitoring integration. Values never appear in
-any output, JSON included; you get fingerprints.
+The list is conservative on purpose: absent means never bulk-write. This rule exists because the first version didn't have it and wrote one project's Supabase key over another's.
+
+### Vercel
+
+Declare it once and every future rotation goes to Vercel too:
+
+```bash
+coo site supabase/SERVICE_KEY --vercel ~/CODE/myapp SUPABASE_KEY production
+coo push supabase/SERVICE_KEY --redeploy
+```
+
+An env var doesn't exist for the app until the next build, so `--redeploy` runs `vercel --prod` after a confirmed write. Deploying is never automatic: the flag for scripts, an explicit `y` at a terminal, otherwise a line telling you it isn't live.
+
+Vercel marks Production variables *sensitive*, meaning write-only — `env pull` returns `""` for them. pigeon confirms the variable is **present** and says plainly that it could not read the value back, rather than claiming a check it didn't do.
+
+## For agents
+
+An agent can do everything except the paste. That's the point — the key never passes through it.
+
+```bash
+coo site <ref> <file> <VAR>      # declare where a key must live. no secret involved.
+coo pending --json               # ["stripe/SECRET_KEY"] — exit 1 while any wait
+coo test --json                  # {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
+coo keys --json                  # the refs, as a JSON array
+printf %s "$KEY" | coo add <ref> --stdin
+coo add <ref> --clipboard        # take what the human copied, verify, land it. no prompts.
+```
+
+The handshake: the agent declares homes and reports `pending`; the human runs `coo` and presses Enter. With `--clipboard` even that disappears — the agent triggers it and the value goes clipboard → keychain → files without passing through the caller.
+
+`--clipboard` **refuses rather than guesses**, because nobody is watching to answer a question: a short clipboard, a different provider than the ref says, or a missing `pbpaste` all stop with nothing stored.
+
+`coo test` exits `0` when nothing is dead and `1` when something is — `coo test || alert` is the whole monitoring integration. Values never appear in any output, JSON included. You get fingerprints.
 
 ## What it is not
 
 - **Not a vault.** Storage is solved (1Password, SOPS, age). pigeon sits on top and keeps what's stored *alive*. Point it at your existing store.
-- **Not a server.** No account, no cloud, no telemetry. It runs offline against your machine and the providers' public APIs. Your values never leave the machine and are never printed — only fingerprints.
-- **Not a security product.** It's key *ops* for people who run agents. The real security control is a spend cap per key (set yours to €10 and a leak is a €10 problem). pigeon tracks which keys have one.
+- **Not a server.** No account, no cloud, no telemetry. It runs against your machine and the providers' public APIs.
+- **Not a security product.** It's key *ops* for people who run agents. The real control is a spend cap per key — set yours to €10 and a leak is a €10 problem.
 
 ## Install
 
@@ -111,22 +146,26 @@ ln -s "$PWD/pigeon/coo" ~/.local/bin/coo   # or anywhere on your PATH
 coo
 ```
 
-That last line — bare `coo` — is the whole thing: it scans your machine, tells you which keys are dead, drained, or the wrong role, and **walks you through pasting fresh ones**, verifying each with the provider before it stores it. No AI (you have no keys yet to run one), no dashboard, no account. One command, a guided paste, done.
+Requires `zsh`, `curl`, `python3`, and the macOS Keychain. `pbpaste` for clipboard mode, `vercel` (Node 18+) only if you declare a Vercel site. A portable [age](https://github.com/FiloSottile/age) backend for Linux and shared nests is the next slice.
 
-Requires `zsh`, `curl`, `python3`, and macOS Keychain. Backend is the macOS Keychain for now; a portable [age](https://github.com/FiloSottile/age)-based backend for Linux and shared/team nests is the next slice.
+## Providers
 
-## Providers checked
+Two different claims, and the difference is the honest part.
 
-Two different claims, and the difference is the honest part:
+**Recognised — 60 providers.** One line each in the `REGISTRY` table at the top of `coo`: display name, key prefixes, env-var convention, default ref, console URL. That table powers the picker, the wrong-provider catch, and the retrieval guides. Adding a provider is **one line and no code**.
 
-**Recognised — 60 providers.** One line each in the `REGISTRY` table at the top of `coo`: display name, key prefixes, env-var convention, default ref, console URL. That table powers the picker, the paste-time wrong-provider catch, and the per-provider retrieval guide. Adding a provider is **one line**, and it needs no code.
+**Probed live — 5 key shapes.** OpenRouter (returns remaining credit), Anthropic, OpenAI, GitHub, and any JWT (decoded locally, shows the role). Everything else is stored and reported `UNKNOWN` — pigeon says it can't check rather than implying it did. Notably there is **no probe for `sb_secret_`**, so a wrong Supabase secret will store and deploy without complaint.
 
-**Probed live — 5 key shapes.** OpenRouter (returns remaining credit), Anthropic, OpenAI, GitHub, and any JWT (decoded locally, shows the role). Anything else is stored and reported as `UNVERIFIED` — pigeon says it can't check rather than implying it did.
+A probe that can't reach the provider reports `UNKNOWN — couldn't reach anthropic, network not your key`, never `DEAD`. Telling someone their live key is dead is how a good key gets revoked by mistake.
 
-The prefixes in `REGISTRY` were written from memory, not scraped from vendor docs. A wrong one is a one-line PR, and that's the point: key formats churn constantly, so the rules should be community-owned rather than mine.
+⚠️ **The prefixes in `REGISTRY` were written from memory, not scraped from vendor docs.** A wrong one causes a false "wrong provider" block. Correcting one is a one-line PR, and that's deliberate: key formats churn constantly, so the rules should be community-owned.
 
 ## Status
 
-v0.2, still one file (~1,120 lines, ~60 of which are the provider table). Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet. `gather`, `check`, `fan`, `rotate`, the picker and the post-paste landing are done and driven end-to-end against real files. The age backend (Linux/VPS + shared nests) is next — see ROADMAP.md.
+v0.2 — one file, ~1,200 lines, ~60 of which are the provider table. Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet, and driven end-to-end against real keys and real production.
+
+Done: the picker, clipboard paste, live verification, post-paste landing, account-vs-project safety, Vercel push + redeploy, the agent handshake, JSON output.
+
+Not done: no probe for most providers, the prefix table is unverified against vendor docs, macOS only, and it has never been run by anyone who isn't its author. See ROADMAP.md.
 
 MIT.
