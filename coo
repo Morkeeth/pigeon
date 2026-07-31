@@ -93,11 +93,13 @@ you never need anything below. they are shortcuts into the same flow:
   coo push <ref> --redeploy   …and deploy, so it is actually live
   coo delete <ref>   remove a key
   coo fix            probe everything on this machine and repair what's broken
+  coo pending        what an agent set up that still needs your paste
   coo install        put coo on your PATH
 
 for scripts and agents:
   coo test --json                          {alive, dead, unverified, keys:[…]}
   coo keys --json                          the refs, as a JSON array
+  coo pending --json                       refs awaiting a human paste (exit 1 if any)
   printf %s "$K" | coo add <ref> --stdin   store one, no terminal needed
   exit codes: coo test → 0 nothing dead, 1 something dead
 
@@ -848,21 +850,44 @@ land_it() {
 paste_and_land() {
   local ref="$1" svc="${1%%/*}"
   local url; url=$(console_of "$svc")
-  print ""; c cyan "  $svc — how to grab it:"
-  guide_of "$svc" | sed 's/^/    /'
-  # Hijacking the browser unasked is rude, and the tab is often the wrong one.
-  # Show the link; open it only if asked.
-  local ob
-  if [[ -n "$url" ]]; then
-    url_line "    " "$url"          # clickable where supported, plain text where not
-    if [[ -z "${COO_TEST:-}" && -t 0 ]]; then
-      print -n "    ⌘-click it above, or press o to open ▸ "
-      read -r ob || ob=""
-      [[ "${ob:l}" == o* || "${ob:l}" == y* ]] && { open "$url" >/dev/null 2>&1 || true; }
+  local v="" clip clipsvc cans ob
+
+  # CLIPBOARD FIRST. If you already copied the key, the console link, the
+  # retrieval steps and the browser prompt are all noise standing between you
+  # and done. The value is never printed — you get the provider it looks like,
+  # its length and its fingerprint, and nothing else.
+  if [[ -z "${COO_TEST:-}" && -t 0 ]] && command -v pbpaste >/dev/null 2>&1; then
+    clip=$(pbpaste 2>/dev/null | tr -d '[:space:]')   # no API key contains whitespace
+    if (( ${#clip} >= 20 )); then
+      clipsvc=$(detect_provider "$clip")
+      print ""
+      if [[ -n "$clipsvc" ]]; then
+        c green "  📋 your clipboard holds a $clipsvc key — $(fp "$clip"), ${#clip} chars"
+      else
+        c 244   "  📋 your clipboard holds something unrecognised — $(fp "$clip"), ${#clip} chars"
+      fi
+      print -n "  use it for $ref? [Y/n] ▸ "
+      read -r cans || cans=""
+      [[ "${cans:l}" == n* ]] || v="$clip"
     fi
   fi
-  print -n "  paste it here (hidden, Enter to cancel) ▸ "
-  local v; read -rs v || true; print ""
+
+  # Nothing usable copied — now the guide earns its place.
+  if [[ -z "$v" ]]; then
+    print ""; c cyan "  $svc — how to grab it:"
+    guide_of "$svc" | sed 's/^/    /'
+    # Hijacking the browser unasked is rude, and the tab is often the wrong one.
+    if [[ -n "$url" ]]; then
+      url_line "    " "$url"        # clickable where supported, plain text where not
+      if [[ -z "${COO_TEST:-}" && -t 0 ]]; then
+        print -n "    ⌘-click it above, or press o to open ▸ "
+        read -r ob || ob=""
+        [[ "${ob:l}" == o* || "${ob:l}" == y* ]] && { open "$url" >/dev/null 2>&1 || true; }
+      fi
+    fi
+    print -n "  paste it here (hidden, Enter to cancel) ▸ "
+    read -rs v || true; print ""
+  fi
   [[ -z "$v" ]] && { c 244 "  cancelled — nothing stored."; return 1; }
 
   # The registry generalises the supabase wrong-row trap to every provider: if
@@ -917,6 +942,32 @@ paste_and_land() {
   c green "  ✓ stashed $ref"
   land_it "$ref" "$v"
   return 0
+}
+
+# ---- pending: the handshake between an agent and a human --------------------
+# An agent can declare where a key must live (no secret involved) but must never
+# hold the key itself. `pending` is how it asks: here is what I set up, here is
+# what still needs your hands. Exit 1 when something is waiting, so a script can
+# branch on it.
+cmd_pending() {
+  local json=0; [[ "${1:-}" == "--json" ]] && json=1
+  local -a pend; local sref
+  while IFS= read -r sref; do
+    [[ -z "$sref" ]] && continue
+    kc_get "$sref" >/dev/null 2>&1 || pend+=("$sref")
+  done <<< "$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).keys()))" "$SITES" 2>/dev/null || true)"
+  if (( json )); then
+    { (( ${#pend} )) && print -l -- $pend } | python3 -c "
+import sys, json
+print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))"
+    (( ${#pend} )) && return 1 || return 0
+  fi
+  if (( ${#pend} == 0 )); then c green "nothing pending — every declared home has its key."; return 0; fi
+  c yellow "${#pend} key(s) have a home declared but nothing in the nest:"
+  print -l -- $pend | sed 's/^/  /'
+  print ""
+  c 244 "  run \`$SELF\` and press Enter, or \`$SELF add <ref>\` for a single one."
+  return 1
 }
 
 # ---- rotate / remove --------------------------------------------------------
@@ -1014,13 +1065,23 @@ cmd_wizard() {
     [[ -z "$sref" ]] && continue
     kc_get "$sref" >/dev/null 2>&1 || pending+=("$sref")
   done <<< "$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).keys()))" "$SITES" 2>/dev/null || true)"
+  # Walk EVERY pending key, not just the first. An agent that set up three
+  # projects declared three homes; making you re-run coo three times is theatre.
   if (( ${#pending} > 0 )); then
-    print ""; c yellow "  unfinished setup: ${pending[1]} (a home is declared, the key is missing)"
-    print -n "  press Enter to finish it now, or m for the menu ▸ "
-    local a; read -r a || true
-    if [[ -z "$a" ]]; then
-      paste_and_land "${pending[1]}" && return 0
-    fi
+    local pref a
+    print ""
+    c yellow "  ${#pending} key(s) have a home declared but nothing in the nest yet."
+    for pref in $pending; do
+      print ""
+      c yellow "  → $pref"
+      print -n "  Enter to set it up now · s to skip it · m for the menu ▸ "
+      read -r a || true
+      case "${a:l}" in
+        "")  paste_and_land "$pref" || true ;;
+        s*)  c 244 "     skipped." ;;
+        *)   break ;;
+      esac
+    done
   fi
 
   local choice p ref   # hoisted: re-declaring these each pass echoed them back
@@ -1378,12 +1439,19 @@ reg_load
 case "${1:-}" in
   ""|setup) cmd_wizard ;;
   # plain-English names first; the older ones still work so nothing breaks.
-  add|new)  shift; if (( $# )); then cmd_stash "$@"; else key_flow; fi ;;
+  # `coo add <ref>` is what an agent hands you: it must be the FULL flow —
+  # retrieval guide, clipboard offer, live verify, land in every file — not the
+  # bare "paste value:" prompt that only stuffs the keychain.
+  add|new)  shift
+            if (( $# == 0 )); then key_flow
+            elif [[ " $* " == *" --stdin "* || ! -t 0 ]]; then cmd_stash "$@"
+            else reg_load; paste_and_land "$1" || true; fi ;;
   test)     shift; cmd_check  "$@" ;;
   keys)     shift; cmd_nest   "$@" ;;
   scan)     shift; cmd_gather "$@" ;;
   delete)   shift; cmd_remove "$@" ;;
   push)     shift; cmd_fan    "$@" ;;
+  pending|needs) shift; cmd_pending "$@" ;;
   fix)      cmd_setup ;;
   doctor)   cmd_setup ;;
   install)  cmd_install ;;
