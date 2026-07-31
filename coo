@@ -42,6 +42,7 @@ RECENT="$NEST/recent"      # providers you actually reach for, most-recent-first
 #   OSC8 — hyperlinks. A URL stays exactly as readable as before, and becomes
 #          clickable where the terminal supports it.
 integer CLIP_ONLY=0
+integer REDEPLOY=0
 SYNC_ON=$'\e[?2026h'; SYNC_OFF=$'\e[?2026l'
 ALT_ON=$'\e[?1049h';  ALT_OFF=$'\e[?1049l'
 CUR_HIDE=$'\e[?25l';  CUR_SHOW=$'\e[?25h'
@@ -112,12 +113,42 @@ EOF
 
 # ---- keychain (the local nest) ----------------------------------------------
 kc_set() {
-  security add-generic-password -U -s "$SERVICE" -a "$1" -w "$2" 2>/dev/null && return 0
+  if security add-generic-password -U -s "$SERVICE" -a "$1" -w "$2" 2>/dev/null; then
+    # `security -w` returns a HEX STRING for any value holding non-ASCII bytes,
+    # so what reads back is not always what went in — and every later step (fan,
+    # check, vercel) uses the read-back. Storing one thing and writing another
+    # into a .env is silent corruption, so verify the round trip or refuse.
+    local back; back=$(kc_get "$1" 2>/dev/null || true)
+    if [[ "$back" != "$2" ]]; then
+      print -u2 "✗ the keychain gave back something different from what we stored for $1."
+      print -u2 "  macOS re-encodes values containing non-ASCII bytes. nothing was written anywhere."
+      security delete-generic-password -s "$SERVICE" -a "$1" >/dev/null 2>&1
+      return 1
+    fi
+    return 0
+  fi
   print -u2 "✗ could not write $1 to the macOS Keychain."
   command -v security >/dev/null 2>&1 \
     && print -u2 "  the keychain may be locked — unlock it in Keychain Access and run again." \
     || print -u2 "  no \`security\` binary: pigeon's nest is macOS-only until the age backend lands (ROADMAP v0.3)."
-  exit 1
+  return 1
+}
+
+# Copying a key out of a terminal usually drags the shell prompt along with it.
+# If a known prefix appears further into the string, the real key starts there.
+trim_to_key() {
+  local s="$1" i p rest best=""
+  (( ${#REG_IDS} )) || return 0
+  for i in {1..${#REG_IDS}}; do
+    [[ -z "${REG_PRE[$i]}" ]] && continue
+    for p in ${(s:,:)REG_PRE[$i]}; do
+      if [[ "$s" == *"$p"* ]]; then
+        rest="$p${s#*$p}"
+        [[ -z "$best" || ${#rest} -gt ${#best} ]] && best="$rest"
+      fi
+    done
+  done
+  print -r -- "$best"
 }
 kc_get() { security find-generic-password -s "$SERVICE" -a "$1" -w 2>/dev/null; }
 IDX="$NEST/index"; [[ -f "$IDX" ]] || : > "$IDX"
@@ -491,24 +522,42 @@ menu_numbered() {
 # ---- ask the provider: is this key alive? -----------------------------------
 # returns "VERDICT|detail". the whole point of pigeon: a key that exists, parses,
 # and is WRONG is the failure that kills agents silently.
+# "couldn't reach the provider" is NOT "the provider rejected your key". Telling
+# someone their live key is DEAD is how a good key gets revoked by mistake, so a
+# probe that cannot connect must say UNKNOWN and say why.
+http_code() { curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" 2>/dev/null || print 000; }
+
 probe() {
-  local v="$1" verdict="UNKNOWN" detail="no probe for this shape"
+  local v="$1" verdict="UNKNOWN" detail="no probe for this shape" hc
   case "$v" in
     sk-or-v1-*)
       local r; r=$(curl -s -m 15 -H "Authorization: Bearer $v" https://openrouter.ai/api/v1/credits 2>/dev/null)
       if [[ "$r" == *'"total_credits"'* ]]; then
         local rem; rem=$(print -r -- "$r" | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(f\"{d['total_credits']-d['total_usage']:.2f}\")" 2>/dev/null)
         if [[ "${rem%%.*}" -lt 5 ]] 2>/dev/null; then verdict=LOW; detail="only \$$rem left"; else verdict=ALIVE; detail="\$$rem left"; fi
-      else verdict=DEAD; detail="provider rejected it"; fi ;;
+      elif [[ -z "$r" ]]; then verdict=UNKNOWN; detail="couldn't reach openrouter — network, not your key"
+      else verdict=DEAD; detail="openrouter rejected it"; fi ;;
     sk-ant-*)
-      [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "x-api-key: $v" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models 2>/dev/null)" == 200 ]] \
-        && { verdict=ALIVE; detail=anthropic; } || { verdict=DEAD; detail="anthropic rejected"; } ;;
+      hc=$(http_code -H "x-api-key: $v" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models)
+      case "$hc" in
+        200)    verdict=ALIVE;   detail=anthropic ;;
+        000|"") verdict=UNKNOWN; detail="couldn't reach anthropic — network, not your key" ;;
+        *)      verdict=DEAD;    detail="anthropic says invalid (HTTP $hc)" ;;
+      esac ;;
     sk-proj-*|sk-svcacct-*)
-      [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "Authorization: Bearer $v" https://api.openai.com/v1/models 2>/dev/null)" == 200 ]] \
-        && { verdict=ALIVE; detail=openai; } || { verdict=DEAD; detail="openai rejected"; } ;;
+      hc=$(http_code -H "Authorization: Bearer $v" https://api.openai.com/v1/models)
+      case "$hc" in
+        200)    verdict=ALIVE;   detail=openai ;;
+        000|"") verdict=UNKNOWN; detail="couldn't reach openai — network, not your key" ;;
+        *)      verdict=DEAD;    detail="openai says invalid (HTTP $hc)" ;;
+      esac ;;
     ghp_*|github_pat_*|gho_*)
-      [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "Authorization: Bearer $v" https://api.github.com/user 2>/dev/null)" == 200 ]] \
-        && { verdict=ALIVE; detail=github; } || { verdict=DEAD; detail="github rejected"; } ;;
+      hc=$(http_code -H "Authorization: Bearer $v" https://api.github.com/user)
+      case "$hc" in
+        200)    verdict=ALIVE;   detail=github ;;
+        000|"") verdict=UNKNOWN; detail="couldn't reach github — network, not your key" ;;
+        *)      verdict=DEAD;    detail="github says invalid (HTTP $hc)" ;;
+      esac ;;
     eyJ*.*.*)
       local claims; claims=$(print -r -- "$v" | python3 -c "
 import sys,json,base64,time
@@ -906,6 +955,24 @@ paste_and_land() {
   fi
   [[ -z "$v" ]] && { c 244 "  cancelled — nothing stored."; return 1; }
 
+  # You copied it out of a terminal and the prompt character came too. If a real
+  # key prefix sits further in, that is where the key starts.
+  local trimmed
+  if [[ -z "$(detect_provider "$v")" ]]; then
+    trimmed=$(trim_to_key "$v")
+    if [[ -n "$trimmed" && "$trimmed" != "$v" ]]; then
+      c yellow "  trimmed $(( ${#v} - ${#trimmed} )) character(s) off the front — looks like the shell prompt came with it"
+      v="$trimmed"
+    fi
+  fi
+  # Anything non-ASCII left over is not part of an API key, and macOS would
+  # hex-encode it in the keychain and hand back a different value later.
+  if [[ "$v" == *[^[:ascii:]]* ]]; then
+    c red "  ✗ that value contains non-ASCII characters — no API key does."
+    c 244 "     you probably copied part of your terminal. re-copy just the key. nothing stored."
+    return 1
+  fi
+
   # The registry generalises the supabase wrong-row trap to every provider: if
   # the value's prefix names a DIFFERENT vendor than the one you picked, you
   # almost certainly copied the wrong row of the wrong dashboard.
@@ -962,7 +1029,8 @@ paste_and_land() {
     *)            c 244 "  no live probe for this shape yet — storing it as-is ($(fp "$v"), ${#v} chars)" ;;
   esac
 
-  kc_set "$ref" "$v"; idx_add "$ref"
+  kc_set "$ref" "$v" || return 1
+  idx_add "$ref"
   c green "  ✓ stashed $ref"
   land_it "$ref" "$v"
   return 0
@@ -1303,7 +1371,6 @@ PY
 
 cmd_fan() {
   local ref="${1:-}" a2
-  integer REDEPLOY=0
   local arg; for arg in "$@"; do [[ "$arg" == "--redeploy" ]] && REDEPLOY=1; done
   [[ "$ref" == "--redeploy" ]] && ref=""
   [[ -n "$ref" ]] || die "usage: $SELF fan <service/NAME>   (declare sites first: $SELF site …)"
@@ -1467,6 +1534,7 @@ case "${1:-}" in
   # retrieval guide, clipboard offer, live verify, land in every file — not the
   # bare "paste value:" prompt that only stuffs the keychain.
   add|new)  shift
+            [[ " $* " == *" --redeploy "* ]] && REDEPLOY=1
             if [[ " $* " == *" --clipboard "* ]]; then
               CLIP_ONLY=1; reg_load; paste_and_land "$1"
             elif (( $# == 0 )); then key_flow
@@ -1485,7 +1553,10 @@ case "${1:-}" in
   check)    shift; cmd_check  "$@" ;;
   nest)     shift; cmd_nest   "$@" ;;
   stash)    shift; cmd_stash  "$@" ;;
-  rotate)   shift; [[ " $* " == *" --clipboard "* ]] && CLIP_ONLY=1; cmd_rotate "$@" ;;
+  rotate)   shift
+            [[ " $* " == *" --clipboard "* ]] && CLIP_ONLY=1
+            [[ " $* " == *" --redeploy "* ]] && REDEPLOY=1
+            cmd_rotate "$@" ;;
   remove|rm) shift; cmd_remove "$@" ;;
   site)     shift; cmd_site   "$@" ;;
   fan)      shift; cmd_fan    "$@" ;;
