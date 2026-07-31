@@ -89,6 +89,8 @@ you never need anything below. they are shortcuts into the same flow:
   coo keys           list what you've got (names only, never values)
   coo scan           find keys scattered across this machine
   coo rotate <ref>   replace a key everywhere, then revoke the old one
+  coo push <ref>     re-send a stored key to its files and its Vercel env
+  coo push <ref> --redeploy   …and deploy, so it is actually live
   coo delete <ref>   remove a key
   coo fix            probe everything on this machine and repair what's broken
   coo install        put coo on your PATH
@@ -1155,6 +1157,29 @@ cmd_setup() {
   print ""; c 244 "  run \`coo\` anytime to re-check, or \`coo fan <ref>\` to push a key everywhere it lives."
 }
 
+# ---- vercel: resolve a CLI that will actually run ---------------------------
+# `npx vercel` resolves BOTH an arbitrary CLI version and whatever node happens
+# to be first on PATH. On this machine a login shell put node 16 ahead of nvm's
+# node 22, and Vercel CLI 56 then died with "TypeError: Headers is not a
+# constructor" — because `Headers` is global only from node 18. That looked like
+# flakiness for hours. Resolve deliberately, and fail with the real reason.
+typeset -ga VERCEL_ARGV
+VERCEL_WHY=""
+vercel_ready() {
+  VERCEL_ARGV=(); VERCEL_WHY=""
+  local nodev major
+  if command -v vercel >/dev/null 2>&1; then VERCEL_ARGV=(vercel)          # pinned install wins
+  elif command -v npx >/dev/null 2>&1; then VERCEL_ARGV=(npx vercel)       # last resort
+  else VERCEL_WHY="no \`vercel\` and no \`npx\` on PATH"; return 1; fi
+  nodev=$(node -v 2>/dev/null) || { VERCEL_WHY="no \`node\` on PATH — the vercel CLI is a node program"; return 1 }
+  major="${${nodev#v}%%.*}"
+  if [[ "$major" == <-> ]] && (( major < 18 )); then
+    VERCEL_WHY="node $nodev is too old for the vercel CLI (needs 18+) — $(command -v node)"
+    return 1
+  fi
+  return 0
+}
+
 # ---- fan: one paste → every place a key lives -------------------------------
 # the copy-paste killer. declare where a key lives once, then `coo fan <ref>`
 # writes the canonical nest value to every declared .env, backing up what it
@@ -1192,7 +1217,10 @@ PY
 }
 
 cmd_fan() {
-  local ref="${1:-}"
+  local ref="${1:-}" a2
+  integer REDEPLOY=0
+  local arg; for arg in "$@"; do [[ "$arg" == "--redeploy" ]] && REDEPLOY=1; done
+  [[ "$ref" == "--redeploy" ]] && ref=""
   [[ -n "$ref" ]] || die "usage: $SELF fan <service/NAME>   (declare sites first: $SELF site …)"
   local can; can=$(kc_get "$ref") || die "no key stored for $ref — stash it first: $SELF stash $ref"
 
@@ -1273,10 +1301,16 @@ for x in d.get(os.environ['REF'], []):
     if x.get('type') == 'vercel':
         print(f\"{x['cwd']}\t{x['var']}\t{x.get('env','production')}\")" 2>/dev/null || true)
   if [[ -n "$vsites" ]]; then
-    local vcwd vvar venv
+    local vcwd vvar venv vout vrc vok=1 dep
+    vercel_ready || vok=0
     while IFS=$'\t' read -r vcwd vvar venv; do
       [[ -z "$vcwd" ]] && continue
       c cyan "  vercel: $vvar → $venv (${vcwd/#$HOME/~})…"
+      if (( ! vok )); then
+        c red "  ✗ can't run the vercel CLI: $VERCEL_WHY"
+        c 244 "    fix that, then: $SELF fan $ref"
+        continue
+      fi
       # Vercel CLI >= 55 turns on --non-interactive by itself "when an agent is
       # detected", and then ignores piped stdin — storing an EMPTY value while
       # exiting 0. Piping a secret in was therefore a silent way to blank a
@@ -1287,19 +1321,47 @@ for x in d.get(os.environ['REF'], []):
       # inherit the REST of that here-string as its stdin and misbehave.
       # No `env rm` first — --force overwrites, and a remove-then-failed-add
       # leaves production with no variable at all.
-      if (cd "$vcwd" \
-            && npx vercel env add "$vvar" "$venv" --value "$can" --force </dev/null >/dev/null 2>&1); then
+      vrc=0
+      vout=$( (cd "$vcwd" && "${VERCEL_ARGV[@]}" env add "$vvar" "$venv" --value "$can" --force </dev/null 2>&1) ) || vrc=$?
+      vout="${vout//$can/<value>}"   # whatever the CLI printed, never echo the key
+      if (( vrc == 0 )); then
         # Vercel marks Production variables sensitive, i.e. write-only: `env pull`
         # returns an empty string for them. So confirm PRESENCE and say plainly
         # that the value itself was not read back. Never claim a check we skipped.
-        if (cd "$vcwd" && npx vercel env ls "$venv" </dev/null 2>/dev/null | grep -qE "^ *${vvar} "); then
-          c green "  ✓ vercel env $vvar ($venv) set — redeploy to make it live"
+        if (cd "$vcwd" && "${VERCEL_ARGV[@]}" env ls "$venv" </dev/null 2>/dev/null | grep -qE "^ *${vvar} "); then
+          c green "  ✓ vercel env $vvar ($venv) set"
           c 244   "    value not read back: Vercel marks it sensitive (write-only)"
+          # An env var does NOT go live until the next build. Deploying to prod
+          # is an outward act, so it is never automatic: --redeploy for scripts,
+          # an explicit yes for humans, and silence otherwise.
+          dep=0
+          if (( REDEPLOY )); then dep=1
+          elif [[ -t 0 && "$venv" == production ]]; then
+            print -n "    this only goes live on the next build. redeploy now? [y/N] ▸ "
+            read -r a2 || a2=""; [[ "${a2:l}" == y* ]] && dep=1
+          else
+            c 244 "    not live until the next build — \`$SELF fan $ref --redeploy\` or deploy yourself"
+          fi
+          if (( dep )); then
+            c cyan "    deploying $venv…"
+            vrc=0
+            vout=$( (cd "$vcwd" && "${VERCEL_ARGV[@]}" --prod --yes </dev/null 2>&1) ) || vrc=$?
+            vout="${vout//$can/<value>}"
+            if (( vrc == 0 )); then
+              c green "    ✓ deployed — $(print -r -- "$vout" | grep -oE 'https://[^ ]*vercel\.app' | tail -1)"
+            else
+              c red "    ✗ deploy failed (exit $vrc):"
+              print -r -- "$vout" | grep -v '^[[:space:]]*$' | tail -3 | sed 's/^/        /'
+            fi
+          fi
         else
           c red "  ✗ vercel took the write but $vvar is not listed — check it by hand."
         fi
       else
-        c red "  ✗ vercel update failed. manual: cd ${vcwd/#$HOME/~} && npx vercel env add $vvar $venv --value ..."
+        # "failed" with no reason is how the last bug hid for a whole morning.
+        c red "  ✗ vercel refused the write (exit $vrc):"
+        print -r -- "$vout" | grep -v '^[[:space:]]*$' | tail -4 | sed 's/^/      /'
+        c 244 "    manual: cd ${vcwd/#$HOME/~} && npx vercel env add $vvar $venv --value …"
       fi
     done <<< "$vsites"
   elif [[ $had_files -eq 0 ]]; then
@@ -1321,6 +1383,7 @@ case "${1:-}" in
   keys)     shift; cmd_nest   "$@" ;;
   scan)     shift; cmd_gather "$@" ;;
   delete)   shift; cmd_remove "$@" ;;
+  push)     shift; cmd_fan    "$@" ;;
   fix)      cmd_setup ;;
   doctor)   cmd_setup ;;
   install)  cmd_install ;;

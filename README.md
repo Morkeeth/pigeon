@@ -39,6 +39,7 @@ coo stash <ref>     paste one key into the nest (hidden)
 coo rotate <ref>    paste a new value, verify it live, fan it, revoke the old
 coo remove <ref>    delete a key from the nest
 coo fan <ref>       push the canonical value everywhere it should live
+coo site <ref> --vercel <dir> <VAR> [env]   also push it to Vercel env
 ```
 
 `coo gather` is the one you run first. It reads your `~/CODE/*/.env`, your shell profile, your agent auth stores, and shows you the mess you didn't know you had — grouped by service, with **divergence flagged**: the same account key wearing three different values across three repos means two of them are stale.
