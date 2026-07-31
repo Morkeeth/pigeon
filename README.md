@@ -31,16 +31,70 @@ They also all charge **per human seat**. Your "team" is five agents and zero hum
 ## What it does
 
 ```
+coo                 the picker: type to filter 60 providers, then add/rotate/fan/remove
 coo gather          find every key scattered across your machine, flag divergence
 coo check           ask each provider: alive? dead? drained? wrong role?
 coo nest            list what you've gathered (names only, never values)
 coo stash <ref>     paste one key into the nest (hidden)
+coo rotate <ref>    paste a new value, verify it live, fan it, revoke the old
+coo remove <ref>    delete a key from the nest
 coo fan <ref>       push the canonical value everywhere it should live
 ```
 
 `coo gather` is the one you run first. It reads your `~/CODE/*/.env`, your shell profile, your agent auth stores, and shows you the mess you didn't know you had — grouped by service, with **divergence flagged**: the same account key wearing three different values across three repos means two of them are stale.
 
 `coo check` is the one that makes people share a screenshot. It asks each provider directly — not the file, the provider — so a key that exists, parses, and is *wrong* gets caught. That's the failure storage tools can't see.
+
+Bare `coo` is the one you actually use. It opens a picker over 60 providers that
+filters as you type — `ant` is enough to land on Anthropic — marks the ones
+already in your nest, and remembers what you reached for last. Take one and you
+get its retrieval steps, its console opened in your browser, and a hidden paste.
+
+Then the part that saves you: **pigeon reads the value's prefix and names it.**
+Paste an `sk-or-v1-…` into the OpenAI slot and it stops you — *"that looks like
+an OpenRouter key, not openai"* — before it stores anything. Same catch that
+saves you from copying Supabase's `anon` row when you wanted `service_role`,
+generalised to every provider in the table. Nothing you paste is ever echoed.
+
+No fzf, no config, no deps — it's raw zsh against `/dev/tty`, and it degrades to
+a plain numbered list wherever there's no terminal.
+
+### Then it actually lands
+
+A vault stores your key. pigeon **puts it where it belongs**, in the same breath
+as the paste. The moment a value is verified, pigeon goes looking for every copy
+already on your machine — matching on the value's *shape*, not the variable
+name, because the fourth copy is always the one somebody called `OR_KEY` at 2am:
+
+```
+🐦 this key already lives in 3 place(s) on this machine:
+    1  ~/CODE/proj1/.env        OPENROUTER_API_KEY   stale (48693564)
+    2  ~/CODE/proj2/.env.local  OR_KEY               stale (9d8616c3)
+    3  ~/.zshrc                 OPENROUTER_API_KEY   stale (2e1fb636)  ⚠ shell profile
+
+overwrite the 2 stale copy(ies) with what you just pasted? [Y/n/p=pick] ▸
+```
+
+One keystroke and the stale copies are gone. Every changed file is backed up as
+`<file>.bak-pigeon` first, and **shell profiles are never bulk-written** — a
+`.zshrc` is a bigger deal than a `.env`, so it needs `p` and an explicit yes.
+
+That is the whole bug pigeon was built for, closed in one prompt: you pasted
+once, and there is no stale fourth copy left to kill an agent next Tuesday.
+
+### For agents
+
+Your fleet has no hands, so nothing here needs a terminal:
+
+```bash
+coo check --json     # {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
+coo nest --json      # the refs, as a JSON array
+printf %s "$KEY" | coo stash openrouter/API_KEY --stdin
+```
+
+`coo check` exits `0` when nothing is dead and `1` when something is — so
+`coo check || alert` is the whole monitoring integration. Values never appear in
+any output, JSON included; you get fingerprints.
 
 ## What it is not
 
@@ -62,10 +116,16 @@ Requires `zsh`, `curl`, `python3`, and macOS Keychain. Backend is the macOS Keyc
 
 ## Providers checked
 
-OpenRouter (with remaining credit), Anthropic, OpenAI, GitHub, and any Supabase / JWT key (decodes and shows the role — the `anon`-where-you-wanted-`service_role` trap). Adding a provider is a few lines in `probe()`. PRs welcome — the whole point is that key formats change constantly, so the rules should be community-owned.
+Two different claims, and the difference is the honest part:
+
+**Recognised — 60 providers.** One line each in the `REGISTRY` table at the top of `coo`: display name, key prefixes, env-var convention, default ref, console URL. That table powers the picker, the paste-time wrong-provider catch, and the per-provider retrieval guide. Adding a provider is **one line**, and it needs no code.
+
+**Probed live — 5 key shapes.** OpenRouter (returns remaining credit), Anthropic, OpenAI, GitHub, and any JWT (decoded locally, shows the role). Anything else is stored and reported as `UNVERIFIED` — pigeon says it can't check rather than implying it did.
+
+The prefixes in `REGISTRY` were written from memory, not scraped from vendor docs. A wrong one is a one-line PR, and that's the point: key formats churn constantly, so the rules should be community-owned rather than mine.
 
 ## Status
 
-v0.1, single file, ~250 lines you can read in one sitting. Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet. `gather` and `check` are done. `fan` (one-paste fan-out) and the age backend are next.
+v0.2, still one file (~1,120 lines, ~60 of which are the provider table). Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet. `gather`, `check`, `fan`, `rotate`, the picker and the post-paste landing are done and driven end-to-end against real files. The age backend (Linux/VPS + shared nests) is next — see ROADMAP.md.
 
 MIT.

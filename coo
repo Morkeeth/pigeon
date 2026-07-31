@@ -16,12 +16,19 @@
 # MIT. https://github.com/Morkeeth/pigeon
 
 set -euo pipefail
+# zsh prints "name=value" when `local name` re-declares a name already live in
+# scope — which happens on every loop iteration. For a tool whose promise is
+# "values are never printed", that is a key leak, not a cosmetic wart. The
+# locals below are all hoisted out of their loops; this makes the whole class
+# impossible to reintroduce.
+setopt typeset_silent
 SERVICE="pigeon-nest"
 SELF="${0:t}"
 SELF_PATH="${0:A}"   # resolved at top level, where $0 is the script — inside a function zsh makes $0 the function name
 NEST="${XDG_DATA_HOME:-$HOME/.local/share}/pigeon"
 mkdir -p "$NEST"
 SITES="$NEST/sites.json"; [[ -f "$SITES" ]] || print '{}' > "$SITES"
+RECENT="$NEST/recent"      # providers you actually reach for, most-recent-first
 
 c()   { print -P "%F{$1}$2%f"; }
 die() { print -u2 "✗ $*"; exit 1; }
@@ -31,15 +38,24 @@ usage() {
   cat <<'EOF'
 🐦 pigeon — gather, check and rotate API keys across your agent fleet
 
-  coo                      the wizard: pick a key, guided grab, paste once, lands everywhere
-  coo doctor               scan + probe everything and walk through fixes
+  coo                      pick a key (type to filter 60 providers) → paste once → it lands
+                           in every file on this machine that already holds one
+  coo doctor               probe every key found on this machine, fix the broken ones
   coo install              put coo on your PATH (run once, then just type coo)
-  coo gather [--collect]   find every key on this machine; --collect stores them
+  coo gather               find every key on this machine, flag stale copies
   coo check [service]      ask each provider if the key still works
   coo nest                 list what's gathered (names only)
   coo stash <ref>          paste one key into the nest (hidden)
-  coo fan <ref>            push the canonical value to every declared site
-  coo site <ref> <path> <VAR>   declare where a key must live
+  coo rotate <ref>         paste a new value, verify live, land it, revoke the old
+  coo remove <ref>         delete a key from the nest
+  coo fan <ref>            push the stored value to every declared home
+  coo site <ref> <path> <VAR>   declare a home by hand (coo usually does this for you)
+
+for scripts and agents:
+  coo check --json         {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
+  coo nest --json          the refs, as a JSON array
+  printf %s "$K" | coo stash <ref> --stdin      store without a terminal
+  exit codes: check → 0 nothing dead, 1 something dead
 
 a "ref" is service/NAME, e.g. openrouter/API_KEY. values are never printed.
 lost? just type coo — it will tell you what's broken and fix it with you.
@@ -47,53 +63,284 @@ EOF
 }
 
 # ---- keychain (the local nest) ----------------------------------------------
-kc_set() { security add-generic-password -U -s "$SERVICE" -a "$1" -w "$2" 2>/dev/null || die "keychain write failed: $1"; }
+kc_set() {
+  security add-generic-password -U -s "$SERVICE" -a "$1" -w "$2" 2>/dev/null && return 0
+  print -u2 "✗ could not write $1 to the macOS Keychain."
+  command -v security >/dev/null 2>&1 \
+    && print -u2 "  the keychain may be locked — unlock it in Keychain Access and run again." \
+    || print -u2 "  no \`security\` binary: pigeon's nest is macOS-only until the age backend lands (ROADMAP v0.3)."
+  exit 1
+}
 kc_get() { security find-generic-password -s "$SERVICE" -a "$1" -w 2>/dev/null; }
 IDX="$NEST/index"; [[ -f "$IDX" ]] || : > "$IDX"
 idx_add() { print "$1" >> "$IDX"; sort -u -o "$IDX" "$IDX"; }
 
+# ---- the provider registry --------------------------------------------------
+# ONE table, six columns:  id | display | rank | prefixes | env var | ref | console
+#
+# `prefixes` is the interesting column. It is what lets pigeon look at a pasted
+# value and NAME it — so a user can paste first and pick never. Empty means that
+# vendor's keys have no distinctive shape; the picker still lists them, we just
+# can't identify the value on sight. Longest prefix wins, so stripe's `sk_live_`
+# beats elevenlabs' bare `sk_`.
+#
+# This table is the community-owned surface: key formats churn constantly, so a
+# PR should only ever need to touch a line here. The prefixes below are written
+# from memory, NOT verified against each vendor's docs — treat a wrong one as a
+# bug report, not a betrayal.
+REGISTRY='
+openai|OpenAI|1|sk-proj-,sk-svcacct-|OPENAI_API_KEY|API_KEY|https://platform.openai.com/api-keys
+anthropic|Anthropic|1|sk-ant-|ANTHROPIC_API_KEY|API_KEY|https://console.anthropic.com/settings/keys
+openrouter|OpenRouter|1|sk-or-v1-|OPENROUTER_API_KEY|API_KEY|https://openrouter.ai/settings/keys
+supabase|Supabase|1|sb_secret_,sb_publishable_|SUPABASE_SERVICE_ROLE_KEY|SERVICE_KEY|https://supabase.com/dashboard/project/_/settings/api-keys
+github|GitHub|1|ghp_,gho_,ghu_,ghs_,ghr_,github_pat_|GITHUB_TOKEN|TOKEN|https://github.com/settings/tokens
+google|Google AI Studio (Gemini)|2|AIza|GOOGLE_API_KEY|API_KEY|https://aistudio.google.com/apikey
+vercel|Vercel|2||VERCEL_TOKEN|TOKEN|https://vercel.com/account/settings/tokens
+groq|Groq|2|gsk_|GROQ_API_KEY|API_KEY|https://console.groq.com/keys
+xai|xAI (Grok)|2|xai-|XAI_API_KEY|API_KEY|https://console.x.ai
+mistral|Mistral|2||MISTRAL_API_KEY|API_KEY|https://console.mistral.ai/api-keys
+deepseek|DeepSeek|3||DEEPSEEK_API_KEY|API_KEY|https://platform.deepseek.com/api_keys
+perplexity|Perplexity|3|pplx-|PERPLEXITY_API_KEY|API_KEY|https://www.perplexity.ai/settings/api
+huggingface|Hugging Face|3|hf_|HF_TOKEN|TOKEN|https://huggingface.co/settings/tokens
+replicate|Replicate|3|r8_|REPLICATE_API_TOKEN|TOKEN|https://replicate.com/account/api-tokens
+elevenlabs|ElevenLabs|3|sk_|ELEVENLABS_API_KEY|API_KEY|https://elevenlabs.io/app/settings/api-keys
+together|Together AI|4||TOGETHER_API_KEY|API_KEY|https://api.together.xyz/settings/api-keys
+fireworks|Fireworks AI|4|fw_|FIREWORKS_API_KEY|API_KEY|https://fireworks.ai/account/api-keys
+cohere|Cohere|4||COHERE_API_KEY|API_KEY|https://dashboard.cohere.com/api-keys
+modal|Modal|4|ak-,as-|MODAL_TOKEN_ID|TOKEN|https://modal.com/settings/tokens
+langsmith|LangSmith|4|lsv2_pt_,lsv2_sk_|LANGCHAIN_API_KEY|API_KEY|https://smith.langchain.com/settings
+stripe|Stripe|2|sk_live_,sk_test_,rk_live_,rk_test_|STRIPE_SECRET_KEY|SECRET_KEY|https://dashboard.stripe.com/apikeys
+clerk|Clerk|4||CLERK_SECRET_KEY|SECRET_KEY|https://dashboard.clerk.com
+slack|Slack|3|xoxb-,xoxp-,xoxa-,xoxs-,xapp-|SLACK_BOT_TOKEN|BOT_TOKEN|https://api.slack.com/apps
+discord|Discord|4||DISCORD_BOT_TOKEN|BOT_TOKEN|https://discord.com/developers/applications
+telegram|Telegram Bot|4||TELEGRAM_BOT_TOKEN|BOT_TOKEN|https://t.me/BotFather
+notion|Notion|4|ntn_,secret_|NOTION_API_KEY|TOKEN|https://www.notion.so/my-integrations
+linear|Linear|4|lin_api_|LINEAR_API_KEY|API_KEY|https://linear.app/settings/api
+figma|Figma|5|figd_|FIGMA_TOKEN|TOKEN|https://www.figma.com/developers/api
+airtable|Airtable|5|pat|AIRTABLE_API_KEY|TOKEN|https://airtable.com/create/tokens
+shopify|Shopify|5|shpat_,shpss_,shpca_,shppa_|SHOPIFY_ACCESS_TOKEN|TOKEN|https://admin.shopify.com
+resend|Resend|3|re_|RESEND_API_KEY|API_KEY|https://resend.com/api-keys
+sendgrid|SendGrid|4|SG.|SENDGRID_API_KEY|API_KEY|https://app.sendgrid.com/settings/api_keys
+twilio|Twilio|4|SK|TWILIO_AUTH_TOKEN|TOKEN|https://console.twilio.com
+gitlab|GitLab|4|glpat-,gldt-|GITLAB_TOKEN|TOKEN|https://gitlab.com/-/user_settings/personal_access_tokens
+npm|npm|4|npm_|NPM_TOKEN|TOKEN|https://www.npmjs.com/settings/~/tokens
+pypi|PyPI|5|pypi-|PYPI_TOKEN|TOKEN|https://pypi.org/manage/account/token/
+docker|Docker Hub|5|dckr_pat_|DOCKER_TOKEN|TOKEN|https://app.docker.com/settings/personal-access-tokens
+aws|AWS|3|AKIA,ASIA|AWS_ACCESS_KEY_ID|ACCESS_KEY|https://console.aws.amazon.com/iam/home#/security_credentials
+cloudflare|Cloudflare|3||CLOUDFLARE_API_TOKEN|TOKEN|https://dash.cloudflare.com/profile/api-tokens
+netlify|Netlify|4|nfp_|NETLIFY_AUTH_TOKEN|TOKEN|https://app.netlify.com/user/applications
+railway|Railway|4||RAILWAY_TOKEN|TOKEN|https://railway.app/account/tokens
+fly|Fly.io|4|FlyV1,fm2_|FLY_API_TOKEN|TOKEN|https://fly.io/user/personal_access_tokens
+neon|Neon|4|napi_|NEON_API_KEY|API_KEY|https://console.neon.tech/app/settings/api-keys
+planetscale|PlanetScale|5|pscale_tkn_,pscale_pw_|PLANETSCALE_TOKEN|TOKEN|https://app.planetscale.com/settings
+upstash|Upstash|4||UPSTASH_REDIS_REST_TOKEN|TOKEN|https://console.upstash.com
+pinecone|Pinecone|4|pcsk_|PINECONE_API_KEY|API_KEY|https://app.pinecone.io
+tavily|Tavily|4|tvly-|TAVILY_API_KEY|API_KEY|https://app.tavily.com/home
+exa|Exa|5||EXA_API_KEY|API_KEY|https://dashboard.exa.ai/api-keys
+firecrawl|Firecrawl|4|fc-|FIRECRAWL_API_KEY|API_KEY|https://www.firecrawl.dev/app/api-keys
+brave|Brave Search|5|BSA|BRAVE_API_KEY|API_KEY|https://api-dashboard.search.brave.com/app/keys
+serper|Serper|5||SERPER_API_KEY|API_KEY|https://serper.dev/api-key
+sentry|Sentry|4|sntrys_,sntryu_|SENTRY_AUTH_TOKEN|TOKEN|https://sentry.io/settings/account/api/auth-tokens/
+posthog|PostHog|4|phc_,phx_|POSTHOG_API_KEY|API_KEY|https://app.posthog.com/settings/project
+datadog|Datadog|5||DATADOG_API_KEY|API_KEY|https://app.datadoghq.com/organization-settings/api-keys
+honeycomb|Honeycomb|5|hcaik_|HONEYCOMB_API_KEY|API_KEY|https://ui.honeycomb.io
+wandb|Weights & Biases|5||WANDB_API_KEY|API_KEY|https://wandb.ai/authorize
+assemblyai|AssemblyAI|5||ASSEMBLYAI_API_KEY|API_KEY|https://www.assemblyai.com/app/account
+deepgram|Deepgram|5||DEEPGRAM_API_KEY|API_KEY|https://console.deepgram.com
+doppler|Doppler|5|dp.pt.,dp.st.,dp.sa.|DOPPLER_TOKEN|TOKEN|https://dashboard.doppler.com
+okx|OKX|5||OKX_API_KEY|API_KEY|https://www.okx.com/account/my-api
+'
+
+typeset -ga REG_IDS REG_DISP REG_RANK REG_PRE REG_ENV REG_REF REG_URL REG_ORDER
+reg_load() {
+  (( ${#REG_IDS} )) && return 0
+  local id disp rank pre env ref url i j
+  while IFS='|' read -r id disp rank pre env ref url; do
+    [[ -z "$id" ]] && continue
+    REG_IDS+=("$id"); REG_DISP+=("$disp"); REG_RANK+=("$rank")
+    REG_PRE+=("$pre"); REG_ENV+=("$env"); REG_REF+=("$ref"); REG_URL+=("$url")
+  done <<< "$REGISTRY"
+  # display order = what you reached for most recently, then popularity.
+  local -a by_rank recent_idx
+  by_rank=( ${(f)"$(for j in {1..${#REG_IDS}}; do printf '%s %s\n' "${REG_RANK[$j]}" "$j"; done | sort -n -k1,1 -k2,2n | cut -d' ' -f2)"} )
+  local r
+  if [[ -f "$RECENT" ]]; then
+    while IFS= read -r r; do
+      [[ -z "$r" ]] && continue
+      j=$(reg_idx "$r") || continue
+      [[ -n "$j" ]] && recent_idx+=("$j")
+    done < "$RECENT"
+  fi
+  REG_ORDER=( $recent_idx )
+  for j in $by_rank; do
+    (( ${REG_ORDER[(Ie)$j]} )) || REG_ORDER+=("$j")
+  done
+}
+reg_idx() {   # id -> array index, empty if unknown
+  local i
+  (( ${#REG_IDS} )) || return 1
+  for i in {1..${#REG_IDS}}; do [[ "${REG_IDS[$i]}" == "$1" ]] && { print "$i"; return 0 } done
+  return 1
+}
+reg_bump() {  # remember what was used, most-recent-first, capped
+  local id="$1" tmp
+  tmp=$(mktemp); { print "$id"; [[ -f "$RECENT" ]] && grep -vxF "$id" "$RECENT" || true; } | head -12 > "$tmp"
+  mv "$tmp" "$RECENT"
+}
+
+# the point of the registry: name a value on sight. longest prefix wins.
+detect_provider() {
+  local v="$1" i p best="" bestlen=0
+  reg_load
+  for i in {1..${#REG_IDS}}; do
+    [[ -z "${REG_PRE[$i]}" ]] && continue
+    for p in ${(s:,:)REG_PRE[$i]}; do
+      [[ "$v" == "$p"* ]] && (( ${#p} > bestlen )) && { best="${REG_IDS[$i]}"; bestlen=${#p} }
+    done
+  done
+  print -r -- "$best"
+}
+
 # ---- what shape is this secret? ---------------------------------------------
 service_of() {
+  local d; d=$(detect_provider "$1")
+  [[ -n "$d" ]] && { print "$d"; return 0 }
   case "$1" in
-    sk-or-v1-*)               print openrouter ;;
-    sk-ant-*)                 print anthropic ;;
-    ghp_*|github_pat_*|gho_*) print github ;;
-    sb_secret_*)              print supabase ;;
-    sk-proj-*|sk-svcacct-*)   print openai ;;
-    eyJ*.*.*)                 print jwt ;;
+    eyJ*.*.*) print jwt ;;
     *) [[ "$1" == 0x[0-9a-fA-F](#c64) || "$1" == [0-9a-fA-F](#c64) ]] && print evm-key || print other ;;
   esac
 }
 console_of() {
-  case "$1" in
-    openrouter) print "https://openrouter.ai/settings/keys" ;;
-    anthropic)  print "https://console.anthropic.com/settings/keys" ;;
-    github)     print "https://github.com/settings/tokens" ;;
-    openai)     print "https://platform.openai.com/api-keys" ;;
-    supabase|jwt) print "https://supabase.com/dashboard/project/_/settings/api-keys" ;;
-    vercel)     print "https://vercel.com/account/settings/tokens" ;;
-    xai)        print "https://console.x.ai" ;;
-    google)     print "https://aistudio.google.com/apikey" ;;
-    mistral)    print "https://console.mistral.ai/api-keys" ;;
-    elevenlabs) print "https://elevenlabs.io/app/settings/api-keys" ;;
-    *) print "" ;;
-  esac
+  local i; reg_load
+  i=$(reg_idx "$1") && { print -r -- "${REG_URL[$i]}"; return 0 }
+  [[ "$1" == jwt ]] && print "https://supabase.com/dashboard/project/_/settings/api-keys" || print ""
+}
+prefix_hint() {   # "looks like sk-ant-…" — the visual confirmation before pasting
+  local i; reg_load
+  i=$(reg_idx "$1") || { print ""; return 0 }
+  [[ -z "${REG_PRE[$i]}" ]] && { print ""; return 0 }
+  local -a ps; ps=( ${(s:,:)REG_PRE[$i]} )   # nested-subscript split yields a CHAR, not an element
+  print -r -- "${ps[1]}…"
 }
 
-# how a human actually retrieves each key — shown in the wizard, step by step.
+# how a human actually retrieves each key — generated from the registry, so a
+# new provider is one table line and needs no prose written for it.
 guide_of() {
-  case "$1" in
-    openai)     print "1. the browser opens at platform.openai.com/api-keys\n2. 'Create new secret key' (or copy an existing one)\n3. copy the sk-proj-… value" ;;
-    anthropic)  print "1. the browser opens at console.anthropic.com\n2. 'Create Key' → copy the sk-ant-… value" ;;
-    openrouter) print "1. the browser opens at openrouter.ai/settings/keys\n2. 'Create Key' → copy the sk-or-v1-… value" ;;
-    supabase)   print "1. the browser opens at your supabase dashboard → pick the project\n2. Settings → API keys\n3. Reveal + copy the SERVICE_ROLE key — the secret one, NOT anon" ;;
-    github)     print "1. the browser opens at github.com/settings/tokens\n2. generate or copy a token (ghp_… or github_pat_…)" ;;
-    vercel)     print "1. the browser opens at vercel.com account tokens\n2. create a token → copy it" ;;
-    xai)        print "1. the browser opens at console.x.ai\n2. API keys → create or copy" ;;
-    google)     print "1. the browser opens at aistudio.google.com/apikey\n2. create or copy the key" ;;
-    mistral)    print "1. the browser opens at console.mistral.ai/api-keys\n2. create or copy the key" ;;
-    *)          print "grab the key from your provider's console, then come back" ;;
-  esac
+  local i hint; reg_load
+  if [[ "$1" == supabase ]]; then
+    print "1. the browser opens at your supabase dashboard → pick the project\n2. Settings → API keys\n3. Reveal + copy the SERVICE_ROLE key — the secret one, NOT anon"
+    return 0
+  fi
+  i=$(reg_idx "$1") || { print "grab the key from your provider's console, then come back"; return 0 }
+  hint=$(prefix_hint "$1")
+  print "1. the browser opens at ${REG_URL[$i]}\n2. create a new key, or copy one you already have"
+  [[ -n "$hint" ]] && print "3. copy the value — it starts with $hint"
+}
+
+# ---- the picker: type to filter, arrows to move, Enter to take --------------
+# No fzf, no deps, no config — raw zsh against /dev/tty. This IS the product:
+# everything behind it is plumbing, but if finding your provider takes more than
+# three keystrokes the tool has already lost.
+reg_filter() {
+  local f="${1:l}" i hay
+  for i in $REG_ORDER; do
+    [[ -z "$f" ]] && { print "$i"; continue }
+    hay="${REG_IDS[$i]:l} ${REG_DISP[$i]:l} ${REG_PRE[$i]:l}"
+    [[ "$hay" == *"$f"* ]] && print "$i"
+  done
+}
+in_nest() { grep -qxF "$1" "$IDX" 2>/dev/null }
+ref_of()  { local i; reg_load; i=$(reg_idx "$1") && print "$1/${REG_REF[$i]}" || print "$1/API_KEY"; }
+
+PICKED=""
+pick_provider() {
+  reg_load; PICKED=""
+  local tty=/dev/tty
+  [[ -r "$tty" && -w "$tty" ]] || { pick_numbered; return $? }
+  local stty_save; stty_save=$(stty -g <"$tty" 2>/dev/null) || { pick_numbered; return $? }
+  # -isig: Ctrl-C arrives as a byte we handle, so the terminal is ALWAYS restored
+  stty -icanon -echo -isig min 1 time 0 <"$tty"
+  printf '\e[?25l' >"$tty"
+
+  local filter="" ch rest sel=1 i n shown drawn=0 ret=1 idx mark hint
+  local -a rows frame
+  while true; do
+    rows=( ${(f)"$(reg_filter "$filter")"} )
+    n=${#rows}; shown=$(( n > 9 ? 9 : n ))
+    (( sel > shown + 1 )) && sel=1
+    (( sel < 1 )) && sel=$(( shown + 1 ))
+
+    frame=()
+    frame+=( "  which key?   %F{244}type to filter · ↑↓ move · ⏎ take · ^C back%f" )
+    frame+=( "  %F{cyan}▸%f ${${filter//\%/%%}}%K{244} %k" )
+    # pad the PLAIN text first — colour codes are zero-width, so padding after
+    # them lands the columns wherever the escape sequences feel like.
+    # NB: zsh expands {1..0} to "1 0", not to nothing — so an empty match list
+    # would index rows[0] and abort under `set -u`. Guard, don't assume.
+    local namecol hintcol
+    (( shown > 0 )) && for i in {1..$shown}; do
+      idx=${rows[$i]}
+      mark=""; in_nest "$(ref_of "${REG_IDS[$idx]}")" && mark="%F{green}● in nest%f"
+      hint=$(prefix_hint "${REG_IDS[$idx]}")
+      namecol=$(printf '%-26s' "${REG_DISP[$idx]}")
+      hintcol=$(printf '%-14s' "$hint")
+      if (( i == sel )); then
+        frame+=( "  %F{cyan}❯%f %B${namecol}%b %F{244}${hintcol}%f ${mark}" )
+      else
+        frame+=( "    ${namecol} %F{244}${hintcol}%f ${mark}" )
+      fi
+    done
+    (( n > shown )) && frame+=( "    %F{244}… $(( n - shown )) more, keep typing%f" )
+    (( n == 0 ))    && frame+=( "    %F{244}nothing matches — ⌫ to widen, or take 'custom' below%f" )
+    if (( sel == shown + 1 )); then
+      frame+=( "  %F{cyan}❯%f %B＋ custom%b %F{244}— name it yourself (anything not listed)%f" )
+    else
+      frame+=( "    ＋ custom %F{244}— name it yourself (anything not listed)%f" )
+    fi
+
+    (( drawn > 0 )) && printf '\e[%dA\e[J' "$drawn" >"$tty"
+    for i in {1..${#frame}}; do print -P -- "${frame[$i]}" >"$tty"; done
+    drawn=${#frame}
+
+    ch=""; read -k 1 ch <"$tty" || break
+    case "$ch" in
+      $'\n'|$'\r')
+        if (( sel <= shown )); then PICKED="${REG_IDS[${rows[$sel]}]}"; else PICKED="custom"; fi
+        ret=0; break ;;
+      $'\x03') ret=1; break ;;                      # Ctrl-C
+      $'\x7f'|$'\b') filter="${filter%?}"; sel=1 ;; # backspace
+      $'\x15') filter=""; sel=1 ;;                  # Ctrl-U
+      $'\e')
+        rest=""; read -t 0.06 -k 2 rest <"$tty" 2>/dev/null || rest=""
+        case "$rest" in
+          '[A') (( sel-- )) ;;
+          '[B') (( sel++ )) ;;
+          '')   ret=1; break ;;                     # bare ESC = back
+        esac ;;
+      [[:print:]]) filter+="$ch"; sel=1 ;;
+    esac
+  done
+
+  printf '\e[%dA\e[J\e[?25h' "$drawn" >"$tty"
+  stty "$stty_save" <"$tty" 2>/dev/null || true
+  [[ $ret -eq 0 && "$PICKED" != custom ]] && reg_bump "$PICKED"
+  return $ret
+}
+
+# no tty (piped, CI, a weird terminal) — same choices, boring and reliable.
+pick_numbered() {
+  reg_load; PICKED=""
+  local i idx c=0
+  print ""
+  for i in ${REG_ORDER[1,12]}; do
+    c=$((c+1)); printf "    %2d) %-26s %s\n" "$c" "${REG_DISP[$i]}" "$(prefix_hint "${REG_IDS[$i]}")"
+  done
+  print "     0) something else (name it yourself)"
+  print -n "  which key? ▸ "
+  local a; read -r a || return 1
+  [[ "$a" == 0 ]] && { PICKED=custom; return 0 }
+  [[ "$a" == <-> && "$a" -ge 1 && "$a" -le $c ]] || return 1
+  PICKED="${REG_IDS[${REG_ORDER[$a]}]}"; reg_bump "$PICKED"; return 0
 }
 
 # ---- ask the provider: is this key alive? -----------------------------------
@@ -111,7 +358,10 @@ probe() {
     sk-ant-*)
       [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "x-api-key: $v" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models 2>/dev/null)" == 200 ]] \
         && { verdict=ALIVE; detail=anthropic; } || { verdict=DEAD; detail="anthropic rejected"; } ;;
-    ghp_*|github_pat_*)
+    sk-proj-*|sk-svcacct-*)
+      [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "Authorization: Bearer $v" https://api.openai.com/v1/models 2>/dev/null)" == 200 ]] \
+        && { verdict=ALIVE; detail=openai; } || { verdict=DEAD; detail="openai rejected"; } ;;
+    ghp_*|github_pat_*|gho_*)
       [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 15 -H "Authorization: Bearer $v" https://api.github.com/user 2>/dev/null)" == 200 ]] \
         && { verdict=ALIVE; detail=github; } || { verdict=DEAD; detail="github rejected"; } ;;
     eyJ*.*.*)
@@ -129,18 +379,34 @@ print(f\"EXPIRED|jwt role={role}, expired\" if exp and exp<time.time() else f\"A
 }
 
 # ---- gather: the hero verb --------------------------------------------------
+# Every place on this machine a key could be hiding. One list, so `gather` and
+# the post-paste "where does this already live?" question can never disagree.
+# (N) = nullglob per pattern: a machine with no ~/CODE is a valid machine, and
+# an unmatched glob must expand to nothing rather than abort the scan.
+key_files() {
+  local -a f
+  f=( $HOME/.zshrc(N) $HOME/.bashrc(N) $HOME/.zshenv(N)
+      $HOME/CODE/*/.env(N) $HOME/CODE/*/.env.*(N) $HOME/CODE/*/.env.local(N)
+      $HOME/.claude/credentials/*.env(N) )
+  f=( ${(u)f} )                                  # .env.local matches two globs
+  f=( ${f:#*.bak-pigeon} )                       # never re-read our own backups
+  f=( ${f:#*.(example|sample|template)} )        # placeholders are not copies
+  print -l -- $f
+}
+is_shell_profile() { [[ "$1" == $HOME/.zshrc || "$1" == $HOME/.bashrc || "$1" == $HOME/.zshenv ]] }
+
 cmd_gather() {
-  local collect=0; [[ "${1:-}" == "--collect" ]] && collect=1
   c cyan "🐦 gathering keys scattered across this machine…"
   print ""
-  local -a files
-  files=( $HOME/.zshrc $HOME/.bashrc $HOME/.zshenv
-          $HOME/CODE/*/.env $HOME/CODE/*/.env.* $HOME/CODE/*/.env.local
-          $HOME/.claude/credentials/*.env )
+  local -a files; files=( ${(f)"$(key_files)"} )
   local tmp; tmp=$(mktemp)
   local f line name value svc
   for f in $files; do
     [[ -f "$f" ]] || continue
+    # .env.example / .env.sample / .env.template hold placeholders by design.
+    # Counting them as real copies invents divergence on a first run — the
+    # exact false red that makes a tool feel dumb before it has earned trust.
+    [[ "$f" == *.(example|sample|template) ]] && continue
     while IFS= read -r line; do
       [[ "$line" == \#* || "$line" != *=* ]] && continue
       name="${line##*export }"; name="${name%%=*}"; name="${name## }"
@@ -179,30 +445,44 @@ cmd_gather() {
   [[ $divergent -gt 0 ]] && c red "  a diverged account key means one copy is stale — that's how an agent dies quiet." \
                           || c green "  no account key has a stale copy. tidy nest."
 
-  if [[ $collect -eq 1 ]]; then
-    print ""; c cyan "collecting one canonical value per service into the nest…"
-    while IFS= read -r s; do
-      [[ -z "$s" || "$s" == other || "$s" == evm-key ]] && continue
-      local first_val ref
-      first_val=$(awk -F'\t' -v s="$s" 'NR==1||$1==s{}' /dev/null)  # placeholder
-    done <<< "$svc_list"
-    c yellow "  (interactive collect lands in the next slice — for now: coo stash <service/NAME>)"
+  print ""
+  if [[ $divergent -gt 0 ]]; then
+    c 244 "  to fix a diverged key: run \`$SELF\`, pick it, paste the good value once —"
+    c 244 "  pigeon will offer to overwrite every stale copy it just listed."
   else
-    print ""; c 244 "  run \`coo check\` to see which of these are already dead."
+    c 244 "  run \`$SELF check\` to see which of these are already dead."
   fi
   rm -f "$tmp"
 }
 
 # ---- check: the tweet ----------------------------------------------------
 cmd_check() {
-  local want="${1:-}"
-  [[ -s "$IDX" ]] || die "nest is empty — stash a key first:  coo stash openrouter/API_KEY"
-  c cyan "🐦 asking each provider if the key still works…"; print ""
+  # --json makes this callable by the fleet it was built for: no colour, no
+  # prose, no values — refs, verdicts and fingerprints only.
+  local want="" json=0 a
+  for a in "$@"; do
+    case "$a" in --json) json=1 ;; *) want="$a" ;; esac
+  done
+  # An empty nest is a new user, not an error. `die` calls exit, so dying here
+  # tore down the whole wizard from inside `cmd_check || true` — the first thing
+  # a first-time user hit if they picked "check" before storing anything.
+  if [[ ! -s "$IDX" ]]; then
+    (( json )) && { print '{"alive":0,"dead":0,"unverified":0,"keys":[]}'; return 0 }
+    c yellow "the nest is empty — nothing to check yet."
+    print "  set up your first key: run \`$SELF\` and pick 1, or \`$SELF stash openrouter/API_KEY\`"
+    return 0
+  fi
+  (( json )) || { c cyan "🐦 asking each provider if the key still works…"; print "" }
   local alive=0 dead=0 unknown=0 ref v res verdict detail color
+  local rows; rows=$(mktemp)
   while IFS= read -r ref; do
     [[ -z "$ref" ]] && continue
     [[ -n "$want" && "$ref" != $want* ]] && continue
-    v=$(kc_get "$ref") || { printf "  %-30s " "$ref"; c red "MISSING (indexed, not in keychain)"; dead=$((dead+1)); continue; }
+    if ! v=$(kc_get "$ref"); then
+      dead=$((dead+1)); print "$ref\tMISSING\tindexed, not in keychain\t-" >> "$rows"
+      (( json )) || { printf "  %-30s " "$ref"; c red "MISSING (indexed, not in keychain)"; }
+      continue
+    fi
     res=$(probe "$v"); verdict="${res%%|*}"; detail="${res#*|}"
     case "$verdict" in
       ALIVE) color=green; alive=$((alive+1)) ;;
@@ -210,21 +490,197 @@ cmd_check() {
       DEAD|EXPIRED) color=red; dead=$((dead+1)) ;;
       *) color=244; unknown=$((unknown+1)) ;;
     esac
-    printf "  %-30s " "$ref"; print -P "%F{$color}${(r:8:)verdict}%f $detail"
+    print "$ref\t$verdict\t$detail\t$(fp "$v")" >> "$rows"
+    (( json )) || { printf "  %-30s " "$ref"; print -P "%F{$color}${(r:8:)verdict}%f $detail"; }
   done < "$IDX"
+  if (( json )); then
+    A=$alive D=$dead U=$unknown python3 -c "
+import sys, json, os
+keys = []
+for line in open(sys.argv[1]):
+    p = line.rstrip('\n').split('\t')
+    if len(p) == 4:
+        keys.append({'ref': p[0], 'verdict': p[1], 'detail': p[2], 'fingerprint': p[3]})
+print(json.dumps({'alive': int(os.environ['A']), 'dead': int(os.environ['D']),
+                  'unverified': int(os.environ['U']), 'keys': keys}, indent=2))" "$rows"
+    rm -f "$rows"
+    (( dead > 0 )) && return 1 || return 0
+  fi
+  rm -f "$rows"
   print ""
   c cyan "  $alive alive · $dead dead · $unknown unverified"
-  [[ $dead -gt 0 ]] && c red "  a dead key that still sits in a config is an agent that fails silently."
+  # Exit status is the contract for `watch`/CI: 0 = nothing dead, 1 = act now.
+  # It used to be inverted — the trailing `[[ $dead -gt 0 ]] &&` was the last
+  # command, so a perfectly healthy nest made `coo check` exit 1.
+  if (( dead > 0 )); then
+    c red "  a dead key that still sits in a config is an agent that fails silently."
+    return 1
+  fi
+  return 0
 }
 
-cmd_nest()  { [[ -s "$IDX" ]] && { c cyan "🐦 the nest:"; sed 's/^/  /' "$IDX"; } || c yellow "the nest is empty."; }
+cmd_nest() {
+  if [[ "${1:-}" == "--json" ]]; then
+    python3 -c "
+import sys, json
+print(json.dumps([l.strip() for l in open(sys.argv[1]) if l.strip()], indent=2))" "$IDX"
+    return 0
+  fi
+  [[ -s "$IDX" ]] && { c cyan "🐦 the nest:"; sed 's/^/  /' "$IDX"; } || c yellow "the nest is empty."
+}
 cmd_stash() {
-  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF stash <service/NAME>"
-  local v; print -n "paste value for $ref (hidden): "; read -rs v; print ""
+  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF stash <service/NAME> [--stdin]"
+  local v
+  if [[ "${2:-}" == "--stdin" || ! -t 0 ]]; then
+    # the agent path: `printf '%s' "$KEY" | coo stash openrouter/API_KEY --stdin`
+    IFS= read -r v || true
+  else
+    print -n "paste value for $ref (hidden): "; read -rs v; print ""
+  fi
   [[ -n "$v" ]] || die "empty, nothing stashed"
   kc_set "$ref" "$v"; idx_add "$ref"
   c green "✓ stashed $ref ($(fp "$v"), ${#v} chars)"
   [[ "$v" == *.*.* ]] && print -r -- "$v" | python3 -c "import sys,json,base64;t=sys.stdin.read().strip().split('.');b=t[1]+'='*(-len(t[1])%4);print('  jwt role:',json.loads(base64.urlsafe_b64decode(b)).get('role','?'))" 2>/dev/null || true
+}
+
+# ---- where does this key ALREADY live? --------------------------------------
+# The bug that started pigeon: you copy a key to four places, one gets revoked,
+# an agent dies quiet. So the moment a fresh value is verified, we go looking for
+# the stale copies — by VALUE SHAPE, not by variable name, because the fourth
+# copy is always the one someone called `OR_KEY` at 2am.
+value_is_provider() {
+  local i p; i=$(reg_idx "$2") || return 1
+  [[ -z "${REG_PRE[$i]}" ]] && return 1
+  for p in ${(s:,:)REG_PRE[$i]}; do [[ "$1" == "$p"* ]] && return 0; done
+  return 1
+}
+sites_paths() {
+  SITES_F="$SITES" REF="$1" python3 -c "
+import json,os
+d = json.load(open(os.environ['SITES_F']))
+for x in d.get(os.environ['REF'], []):
+    if x.get('type') != 'vercel': print(x['path'])" 2>/dev/null || true
+}
+find_existing_homes() {   # -> path \t VAR \t same|stale \t fingerprint
+  # NB: `local a="$1" b="${a%%/*}"` reads the CALLER's `a`, silently, with no
+  # error when one exists. Derive on a separate line, always.
+  local ref="$1" can="$2"
+  local id="${ref%%/*}" refname="${ref#*/}"
+  local i envvar=""; i=$(reg_idx "$id") && envvar="${REG_ENV[$i]}"
+  local f line name value hit
+  for f in ${(f)"$(key_files)"}; do
+    [[ -f "$f" && -r "$f" ]] || continue
+    [[ "$f" == *.(example|sample|template) ]] && continue
+    while IFS= read -r line; do
+      [[ "$line" == \#* || "$line" != *=* ]] && continue
+      name="${line##*export }"; name="${name%%=*}"; name="${name//[[:space:]]/}"
+      value="${line#*=}"; value="${value//\"/}"; value="${value//\'/}"
+      [[ ${#value} -ge 20 && -n "$name" ]] || continue
+      hit=0
+      if value_is_provider "$value" "$id"; then
+        [[ "$(detect_provider "$value")" == "$id" ]] && hit=1     # resolve prefix collisions
+      fi
+      [[ -n "$envvar" && "$name" == "$envvar" ]] && hit=1
+      [[ "$name" == "$refname" ]] && hit=1
+      (( hit )) || continue
+      if [[ "$value" == "$can" ]]; then print "$f\t$name\tsame\t$(fp "$value")"
+      else                              print "$f\t$name\tstale\t$(fp "$value")"; fi
+    done < "$f"
+  done
+}
+
+# ---- land it: the whole point. a paste that ends in the right files. --------
+land_it() {
+  local ref="$1" can="$2"
+  local id="${ref%%/*}"
+  local i envvar=""; i=$(reg_idx "$id") && envvar="${REG_ENV[$i]}"
+
+  # 1. homes you already declared are not a question — just deliver.
+  local declared n_sites
+  declared=$(sites_paths "$ref")
+  n_sites=$(print -r -- "$declared" | grep -c . || true)
+  (( n_sites > 0 )) && { print ""; cmd_fan "$ref" || true; }
+
+  # 2. homes we can SEE but you never declared.
+  local homes
+  homes=$(find_existing_homes "$ref" "$can" | sort -u)
+  if [[ -n "$declared" ]]; then
+    homes=$(print -r -- "$homes" | grep -vF -f <(print -r -- "$declared") || true)
+  fi
+  local -a hp hv hs hf
+  local p n s g
+  while IFS=$'\t' read -r p n s g; do
+    [[ -z "$p" ]] && continue
+    hp+=("$p"); hv+=("$n"); hs+=("$s"); hf+=("$g")
+  done <<< "$homes"
+
+  local stale=0
+  (( ${#hp} > 0 )) && for i in {1..${#hp}}; do
+    [[ "${hs[$i]}" == stale ]] && ! is_shell_profile "${hp[$i]}" && (( ++stale ))
+  done
+
+  if (( ${#hp} > 0 )); then
+    print ""; c cyan "🐦 this key already lives in ${#hp} place(s) on this machine:"
+    for i in {1..${#hp}}; do
+      local tag warn=""
+      is_shell_profile "${hp[$i]}" && warn=" %F{yellow}⚠ shell profile%f"
+      if [[ "${hs[$i]}" == same ]]; then tag="%F{green}already correct%f"
+      else tag="%F{red}stale (${hf[$i]})%f"; fi
+      print -P -- "     $(printf '%2d' $i)  $(printf '%-34s %-26s' "${hp[$i]/#$HOME/~}" "${hv[$i]}") $tag$warn"
+    done
+  fi
+
+  # non-interactive: report, never act.
+  if [[ ! -t 0 ]]; then
+    (( stale > 0 )) && c yellow "  $stale stale copy(ies) left alone — run \`$SELF\` in a terminal to overwrite them."
+    return 0
+  fi
+
+  local ans j
+  if (( stale > 0 )); then
+    print ""
+    print -n "  overwrite the $stale stale copy(ies) with what you just pasted? [Y/n/p=pick] ▸ "
+    read -r ans || ans=""
+    case "${ans:l}" in
+      n*) c 244 "  left alone. they will keep failing until something rewrites them." ;;
+      p*) for i in {1..${#hp}}; do
+            [[ "${hs[$i]}" == same ]] && continue
+            print -n "     ${hp[$i]/#$HOME/~} (${hv[$i]}) ? [y/N] ▸ "
+            read -r ans || ans=""
+            [[ "${ans:l}" == y* ]] && cmd_site "$ref" "${hp[$i]}" "${hv[$i]}" >/dev/null
+          done
+          cmd_fan "$ref" || true ;;
+      *)  for i in {1..${#hp}}; do
+            [[ "${hs[$i]}" == same ]] && continue
+            # a shell profile is a bigger deal than a .env — never bulk-write one.
+            is_shell_profile "${hp[$i]}" && { c 244 "     skipped ${hp[$i]/#$HOME/~} (shell profile — use p to include it)"; continue }
+            cmd_site "$ref" "${hp[$i]}" "${hv[$i]}" >/dev/null
+          done
+          cmd_fan "$ref" || true ;;
+    esac
+  fi
+
+  # 3. a home it does not have yet.
+  print ""
+  if (( ${#hp} == 0 && n_sites == 0 )); then
+    c 244 "  nothing on this machine holds a $id key yet."
+    print -n "  which file should hold it? (path, or Enter to keep it nest-only) ▸ "
+  else
+    print -n "  any other file that should hold it? (path, or Enter to finish) ▸ "
+  fi
+  local np nv
+  read -r np || np=""
+  [[ -z "$np" ]] && { c green "  ✓ done — $ref is in your nest$( (( ${#hp} + n_sites > 0 )) && print -n " and its files")."; return 0 }
+  np="${np/#\~/$HOME}"
+  print -n "  variable name in that file${envvar:+ [$envvar]} ▸ "
+  read -r nv || nv=""
+  [[ -z "$nv" ]] && nv="$envvar"
+  [[ -z "$nv" ]] && { c yellow "  no variable name — skipped."; return 0 }
+  [[ -f "$np" ]] || { c yellow "  $np does not exist yet — creating it."; : > "$np"; }
+  cmd_site "$ref" "$np" "$nv" >/dev/null
+  cmd_fan "$ref" || true
+  c green "  ✓ done — pasted once, landed everywhere."
+  return 0
 }
 
 # ---- paste_and_land: one guided paste, verified, delivered everywhere -------
@@ -240,6 +696,25 @@ paste_and_land() {
   print -n "  paste it here (hidden, Enter to cancel) ▸ "
   local v; read -rs v || true; print ""
   [[ -z "$v" ]] && { c 244 "  cancelled — nothing stored."; return 1; }
+
+  # The registry generalises the supabase wrong-row trap to every provider: if
+  # the value's prefix names a DIFFERENT vendor than the one you picked, you
+  # almost certainly copied the wrong row of the wrong dashboard.
+  local seen ans seen_i seen_name; seen=$(detect_provider "$v")
+  if [[ -n "$seen" && "$seen" != "$svc" ]]; then
+    seen_name="$seen"; seen_i=$(reg_idx "$seen") && seen_name="${REG_DISP[$seen_i]}"
+    if reg_idx "$svc" >/dev/null 2>&1; then
+      # you picked a known provider and pasted a different one's key — that is
+      # the wrong-dashboard-row mistake, and it deserves a hard stop.
+      c yellow "  ⚠ that looks like a $seen_name key ($(prefix_hint "$seen")), not $svc."
+      print -n "     store it as $ref anyway? [y/N] ▸ "
+      read -r ans || ans=""
+      [[ "$ans" == [yY]* ]] || { c 244 "  nothing stored. grab the right row and run coo again."; return 1 }
+    else
+      # you named this yourself, so you meant it — just say what we can see.
+      c 244 "  (looks like a $seen_name key — storing it as $ref, your name wins.)"
+    fi
+  fi
 
   # supabase wants the SERVICE_ROLE key specifically; catch the classic wrong-row copy.
   if [[ "$ref" == supabase/* && "$v" == eyJ*.*.* ]]; then
@@ -261,14 +736,81 @@ paste_and_land() {
 
   kc_set "$ref" "$v"; idx_add "$ref"
   c green "  ✓ stashed $ref"
-  local n_sites
-  n_sites=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d.get(sys.argv[2],[])))" "$SITES" "$ref" 2>/dev/null || print 0)
-  if [[ "$n_sites" -gt 0 ]]; then
-    cmd_fan "$ref" || true
-  else
-    c 244 "  it lives safe in the nest. to auto-deliver it into a project: coo site $ref <file> <VAR>"
-  fi
+  land_it "$ref" "$v"
   return 0
+}
+
+# ---- rotate / remove --------------------------------------------------------
+cmd_rotate() {
+  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF rotate <service/NAME>"
+  local old oldfp="nothing stored yet"
+  old=$(kc_get "$ref" 2>/dev/null || true); [[ -n "$old" ]] && oldfp=$(fp "$old")
+  c cyan "🐦 rotating $ref — the value in the nest right now is $oldfp"
+  paste_and_land "$ref" || return 1
+  local url; url=$(console_of "${ref%%/*}")
+  print ""
+  c yellow "  one step left, and only you can do it: REVOKE the old key ($oldfp)."
+  [[ -n "$url" ]] && print "    $url"
+  c 244 "  pigeon deliberately never revokes for you — a wrong guess there takes prod down."
+  return 0
+}
+
+cmd_remove() {
+  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF remove <service/NAME>"
+  in_nest "$ref" || { c yellow "  $ref is not in the nest."; return 0 }
+  print -n "  remove $ref? the value is deleted from your keychain. [y/N] ▸ "
+  local a; read -r a || a=""
+  [[ "$a" == [yY]* ]] || { c 244 "  left alone."; return 0 }
+  security delete-generic-password -s "$SERVICE" -a "$ref" >/dev/null 2>&1 || true
+  local tmp; tmp=$(mktemp); grep -vxF "$ref" "$IDX" > "$tmp" 2>/dev/null || : > "$tmp"; mv "$tmp" "$IDX"
+  c green "  ✓ removed $ref from the nest"
+  c 244 "  note: any file that already holds this value still holds it — pigeon does not reach back in."
+}
+
+# ---- one key, every verb, no memorising -------------------------------------
+key_actions() {
+  local ref="$1" id="${1%%/*}" a sp sv2 def i
+  while true; do
+    print ""
+    c cyan "  $ref — already in the nest"
+    print "    r) rotate   paste a new value, verify it live, push it everywhere"
+    print "    c) check    ask the provider right now: alive, dead, drained?"
+    print "    f) fan      push the stored value to its declared homes"
+    print "    s) site     declare another file + variable this key must live in"
+    print "    d) delete   remove it from the nest"
+    print "    b) back"
+    print -n "  ▸ "
+    read -r a || return 0
+    case "$a" in
+      r) cmd_rotate "$ref" || true; return 0 ;;
+      c) print ""; cmd_check "$ref" || true ;;
+      f) print ""; cmd_fan "$ref" || true ;;
+      s) print -n "  which file must hold it? ▸ "; read -r sp || continue
+         def=""; i=$(reg_idx "$id") && def="${REG_ENV[$i]}"
+         print -n "  variable name in that file${def:+ [$def]} ▸ "; read -r sv2 || continue
+         [[ -z "$sv2" ]] && sv2="$def"
+         if [[ -n "$sp" && -n "$sv2" ]]; then cmd_site "$ref" "$sp" "$sv2" || true; else c 244 "  skipped."; fi ;;
+      d) cmd_remove "$ref" || true; return 0 ;;
+      b|B|"") return 0 ;;
+      *) c 244 "  r, c, f, s, d or b." ;;
+    esac
+  done
+}
+
+key_flow() {
+  pick_provider || return 0
+  local id="$PICKED" ref
+  if [[ "$id" == custom ]]; then
+    print ""
+    print "  name it. \"service/NAME\" — the service groups it, the NAME is yours."
+    print -n "  e.g. stripe/WEBHOOK_SECRET ▸ "
+    read -r ref || return 0
+    [[ -n "$ref" ]] || { c 244 "  nothing named."; return 0 }
+    [[ "$ref" == */* ]] || ref="custom/$ref"
+  else
+    ref=$(ref_of "$id")
+  fi
+  if in_nest "$ref"; then key_actions "$ref"; else paste_and_land "$ref" || true; fi
 }
 
 # ---- the wizard: what bare `coo` runs. zero args, zero memorizing. -----------
@@ -295,32 +837,18 @@ cmd_wizard() {
     fi
   fi
 
+  local choice p ref   # hoisted: re-declaring these each pass echoed them back
   while true; do
     print ""
     print "  what do you want to do?"
-    print "    1) set up a key     pick a provider, grab it (guided), paste once — it lands everywhere"
-    print "    2) check my keys    ask each provider: alive, dead, drained?"
-    print "    3) find keys        scan this machine for scattered copies"
+    print "    1) add or fix a key   pick from 60 providers, paste once, it lands in every file"
+    print "    2) check my keys      ask each provider: alive, dead, drained?"
+    print "    3) find keys          scan this machine for scattered and stale copies"
     print "    q) quit"
     print -n "  ▸ "
-    local choice; read -r choice || return 0
+    read -r choice || return 0
     case "$choice" in
-      1)
-        print ""
-        print "    1) openai       2) anthropic    3) openrouter"
-        print "    4) supabase     5) github       6) vercel"
-        print "    7) xai/grok     8) google       9) mistral"
-        print "    0) something else (type service/NAME yourself)"
-        print -n "  which key? ▸ "
-        local p ref=""; read -r p || return 0
-        case "$p" in
-          1) ref=openai/API_KEY ;;  2) ref=anthropic/API_KEY ;; 3) ref=openrouter/API_KEY ;;
-          4) ref=supabase/SERVICE_KEY ;; 5) ref=github/TOKEN ;; 6) ref=vercel/TOKEN ;;
-          7) ref=xai/API_KEY ;;     8) ref=google/API_KEY ;;    9) ref=mistral/API_KEY ;;
-          0) print -n "  ref (service/NAME) ▸ "; read -r ref || return 0 ;;
-          *) c 244 "  never mind."; continue ;;
-        esac
-        [[ -n "$ref" ]] && { paste_and_land "$ref" || true; } ;;
+      1) key_flow || true ;;
       2) print ""; cmd_check || true ;;
       3) print ""; cmd_gather || true ;;
       q|Q|"") return 0 ;;
@@ -372,10 +900,12 @@ cmd_setup() {
   # fresh paste for anything DEAD / LOW / not yet in the nest.
   local -a services; services=(openrouter anthropic openai github supabase)
   print ""; c cyan "  here's what I found:"; print ""
-  local s val res verdict detail fresh
+  # `stored` and `vres` MUST be declared here, not inside the loop: a re-declared
+  # local echoes its current value, and `stored` holds a live API key.
+  local s val res verdict detail fresh stored vres vv
   for s in $services; do
     val=$(awk -F'\t' -v s="$s" '$1==s{print $2; exit}' "$tmp")
-    local stored; stored=$(kc_get "$s/API_KEY" 2>/dev/null || true)
+    stored=$(kc_get "$s/API_KEY" 2>/dev/null || true)
     [[ -z "$val" && -n "$stored" ]] && val="$stored"
 
     if [[ -z "$val" ]]; then
@@ -394,7 +924,7 @@ cmd_setup() {
     print -n "  └─ paste a fresh $s key here (hidden, or Enter to skip) ▸ "
     read -rs fresh; print ""
     [[ -z "$fresh" ]] && { c 244 "     skipped."; continue; }
-    local vres; vres=$(probe "$fresh"); local vv="${vres%%|*}"
+    vres=$(probe "$fresh"); vv="${vres%%|*}"
     if [[ "$vv" == DEAD || "$vv" == EXPIRED ]]; then
       c red "     that one's also rejected by the provider — not stored. try again with \`coo stash $s/API_KEY\`."
       continue
@@ -412,14 +942,20 @@ cmd_setup() {
   site_refs=$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).keys()))" "$SITES" 2>/dev/null || true)
   if [[ -n "$site_refs" ]]; then
     print ""; c cyan "  keys with declared homes:"
-    local sref sv
+    local sref sv surl ans
     while IFS= read -r sref; do
       [[ -z "$sref" ]] && continue
       if kc_get "$sref" >/dev/null 2>&1; then
-        cmd_fan "$sref" || true
+        # Never fan an already-stored key unasked. A declared site can be a
+        # Vercel production env; pushing whatever happens to sit in the nest
+        # (including a stale or placeholder value) is not a diagnostic.
+        print -n "  $sref already in the nest — push it to its declared homes? [y/N] ▸ "
+        read -r ans || ans=""
+        if [[ "$ans" == [yY]* ]]; then cmd_fan "$sref" || true
+        else c 244 "     left alone."; fi
       else
         c yellow "  $sref has a declared home but no key in the nest yet."
-        local surl; surl=$(console_of "${sref%%/*}")
+        surl=$(console_of "${sref%%/*}")
         [[ -n "$surl" ]] && { c 244 "     opening where it lives: $surl"; open "$surl" >/dev/null 2>&1 || true; }
         print -n "  └─ paste it now (hidden, or Enter to skip) ▸ "
         read -rs sv; print ""
@@ -566,6 +1102,11 @@ for x in d.get(os.environ['REF'], []):
   fi
 }
 
+# Load the registry in the MAIN shell. Every helper calls reg_load defensively,
+# but most are invoked as $(...) — so their arrays died with the subshell and the
+# parent still saw an empty registry. Load once, here, and it is always there.
+reg_load
+
 case "${1:-}" in
   ""|setup) cmd_wizard ;;
   doctor)   cmd_setup ;;
@@ -574,6 +1115,8 @@ case "${1:-}" in
   check)    shift; cmd_check  "$@" ;;
   nest)     shift; cmd_nest   "$@" ;;
   stash)    shift; cmd_stash  "$@" ;;
+  rotate)   shift; cmd_rotate "$@" ;;
+  remove|rm) shift; cmd_remove "$@" ;;
   site)     shift; cmd_site   "$@" ;;
   fan)      shift; cmd_fan    "$@" ;;
   -h|--help|help) usage ;;
