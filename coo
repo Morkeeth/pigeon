@@ -164,9 +164,13 @@ idx_add() { print "$1" >> "$IDX"; sort -u -o "$IDX" "$IDX"; }
 # beats elevenlabs' bare `sk_`.
 #
 # This table is the community-owned surface: key formats churn constantly, so a
-# PR should only ever need to touch a line here. The prefixes below are written
-# from memory, NOT verified against each vendor's docs — treat a wrong one as a
-# bug report, not a betrayal.
+# PR should only ever need to touch a line here.
+#
+# PROVENANCE: as of 2026-08-01, 33 of the 70 prefixes below carry a vendor-doc
+# citation; 37 do not. Per-prefix status and source URLs are in PREFIXES.md.
+# An uncited prefix was written from memory in v0.1 and has never been confirmed —
+# it may be right, it is simply unproven. Treat a wrong one as a bug report, not a
+# betrayal. PREFIXES.md also lists four known defects in this table, still unfixed.
 REGISTRY='
 openai|OpenAI|1|sk-proj-,sk-svcacct-|OPENAI_API_KEY|API_KEY|https://platform.openai.com/api-keys
 anthropic|Anthropic|1|sk-ant-|ANTHROPIC_API_KEY|API_KEY|https://console.anthropic.com/settings/keys

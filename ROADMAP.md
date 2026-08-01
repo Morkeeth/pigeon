@@ -26,22 +26,74 @@ The slice that made it usable. All of it driven against real keys and real produ
 ## v0.3 — earn the trust back
 v0.2 wrote one project's key over another's, twice, before the scope rule existed. Close the gaps that made that possible before adding anything new.
 
-- **Verify the 60 prefixes against vendor docs.** They were written from memory. A wrong one causes a false "wrong provider" block — in the guard everything else now leans on.
-- **Probe more shapes.** `sb_secret_` has none, so a wrong Supabase key stores and deploys silently. Same for Vercel, Stripe, Groq, xAI, Google.
+- ~~**Verify the 60 prefixes against vendor docs.**~~ Done 2026-08-01 → [PREFIXES.md](PREFIXES.md). 33 of 70 prefixes now carry a vendor-doc citation; 37 are marked UNVERIFIED because no vendor page states them. The pass surfaced four defects, all still unfixed:
+  - **Twilio `SK` is on the wrong field** — it's the API Key SID prefix, not the Auth Token. Live false-positive in the guard. Fix first.
+  - **Cloudflare has three documented prefixes** (`cfk_`, `cfut_`, `cfat_`) and pigeon carries none — a missed detection.
+  - **npm `npm_`** and **Neon `napi_`** are contradicted by their own vendor docs. Need a real key or a better page to settle.
+- ~~**Close the citation gap.**~~ **DEFERRED to the community (ruled 2026-08-01).** The remaining 37 block no one — they are published as UNVERIFIED and the table was built for exactly this (one line, no code). Vendors that document more than pigeon carries, for whoever picks it up: GitLab (14 vs 2), Doppler (7 vs 3), Stripe (`pk_*`, `sk_org_`), Slack (`xwfp-`).
+- **Probe more shapes.** `sb_secret_` has none, so a wrong Supabase key stores and deploys silently. Same for Vercel, Stripe, Groq, xAI, Google. → **`sb_secret_` pulled forward into v1.0 slice 2**; the rest stay here.
 - **`--dry-run`** — print every file it *would* touch before it touches one.
 
-## v0.4 — someone who isn't me
-- The cold-start test: a stranger clones it and reaches a landed key with no help
-- Make the repo public — it is private today, so the README's `git clone` is a lie for everyone else
-- `brew install` tap, then a `curl -fsSL … | sh` one-liner
+## v1.0 — go public, with DX people can feel
 
-## v0.5 — age backend (portability)
-Keychain is Mac-only. An [age](https://github.com/FiloSottile/age)-based backend stores the nest as an encrypted file that works on Linux, a VPS, and — encrypted into a repo — a **shared team nest** with no server. The slice that turns "Oscar's tool" into "anyone's tool".
+**Ruled 2026-08-01.** pigeon goes public. Not because a market was found — because the
+author has this problem and found nothing that solves it. The bar for shipping is not
+"it works", it is: *someone installs it and thinks "he really thought about this."*
 
-## v0.6 — `watch`
+**Platform ruling: macOS-only, and said in line 1 of the README — not in a footnote.**
+Perfect for the people it serves beats mediocre for everyone. Portability moves to v1.1
+and is the obvious first community PR.
+
+Seven slices, ordered by what unblocks the most. Each ships and verifies alone.
+
+**1. Cold-start reconnaissance** — become the stranger before designing for them.
+Fresh clone into a throwaway `HOME`: no Keychain entries, no `~/.local/bin`, no `sites.json`.
+Record every stumble verbatim.
+- done when: a numbered list of real stumbles exists, each with the exact output the stranger saw
+- size **S** · **risk: this is the unknown.** Slices 4–5 are guesswork until it runs — expect it to rewrite them
+
+**2. Correctness debt** — never ship a known false-positive.
+The four defects in [PREFIXES.md](PREFIXES.md), plus the missing `sb_secret_` probe (a silent
+wrong Supabase key is what broke litmus twice).
+- done when: a real Twilio auth token stores without a "wrong provider" block; a bad `sb_secret_` reports DEAD, not UNKNOWN
+- size **M** · risk: npm + Neon need a real token shape to settle
+
+**3. Install path** — the front door.
+`brew install morkeeth/tap/pigeon`, plus a `curl -fsSL … | sh` fallback.
+- done when: both land `coo` on PATH on a machine that has never seen the repo
+- size **M** · risk: tap repo + formula is new ground
+
+**4. The first 60 seconds** — `coo` on an empty nest → first key landed.
+The whole "wow" lives here: motion, spacing, colour, the picker's feel, and what the very
+first run shows when there is nothing to show.
+- done when: a stranger reaches a landed key having read no README, timed under 60s
+- size **L** · risk: taste-bound. Needs `/design-taste` and Oscar's eye — not an agent's assertion that it looks good
+
+**5. Failure and empty states** — where "he really thought about it" actually lives.
+Nothing gathered · probe can't reach · key rejected · wrong provider · Keychain locked.
+- done when: all five hit on purpose and screenshotted, none reading like a stack trace
+- size **M**
+
+**6. Repo surface** — what people judge before they install.
+README line 1 = macOS-only. `CONTRIBUTING.md` aiming the 37 uncited prefixes at the community
+(that is what the one-line-no-code table was built for). Issue templates, LICENSE, a real demo cast.
+- done when: someone who never installs it can tell in 10s what it does and whether it runs on their machine
+- size **M**
+
+**7. Flip public — and re-run slice 1 as the gate.**
+- done when: repo is public and a second cold-start produces zero stumbles from the slice-1 list
+- size **S**
+
+**Deferred on purpose:** the 37 uncited prefixes — proven 2026-08-01 to block no one, and
+community-shaped work by design. Linux/portable backend → v1.1.
+
+## v1.1 — age backend (portability)
+Keychain is Mac-only. An [age](https://github.com/FiloSottile/age)-based backend stores the nest as an encrypted file that works on Linux, a VPS, and — encrypted into a repo — a **shared team nest** with no server. The slice that turns "Oscar's tool" into "anyone's tool". **First community PR candidate.**
+
+## v1.2 — `watch`
 A scheduled `test` that notifies the moment a key goes DEAD or LOW — before an agent fails silently. The promise the incumbents can't make, because they check the file, not the provider.
 
-## v0.7 — MCP server
+## v1.3 — MCP server
 An endpoint so an agent can ask "is my key alive / how much budget is left" mid-run instead of shelling out.
 
 ## Non-goals (on purpose)

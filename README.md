@@ -158,7 +158,17 @@ Two different claims, and the difference is the honest part.
 
 A probe that can't reach the provider reports `UNKNOWN — couldn't reach anthropic, network not your key`, never `DEAD`. Telling someone their live key is dead is how a good key gets revoked by mistake.
 
-⚠️ **The prefixes in `REGISTRY` were written from memory, not scraped from vendor docs.** A wrong one causes a false "wrong provider" block. Correcting one is a one-line PR, and that's deliberate: key formats churn constantly, so the rules should be community-owned.
+**Cited — 33 of 70 prefixes.** As of 2026-08-01, every prefix in `REGISTRY` has been checked against the vendor's own documentation, and the result is in [PREFIXES.md](PREFIXES.md), one row per prefix with the source URL:
+
+| | prefixes | provider rows |
+|---|---|---|
+| **VERIFIED** — vendor doc URL on file | **33 / 70** | 15 / 60 fully cited |
+| **UNVERIFIED** — no vendor doc found | **37 / 70** | 27 / 60 with ≥1 uncited prefix |
+| rows claiming no prefix at all | — | 18 / 60 |
+
+⚠️ **37 of 70 prefixes remain unverified** — written from memory in v0.1 and never confirmed. They may be correct; they are not proven, and pigeon does not claim they are. A wrong one causes a false "wrong provider" block. Correcting one is a one-line PR, and that's deliberate: key formats churn constantly, so the rules should be community-owned.
+
+The pass also found four defects, all listed in [PREFIXES.md](PREFIXES.md#findings). One is live: **Twilio's `SK` is attached to the wrong field** — it's the API Key SID prefix, not the Auth Token, so pigeon currently rejects a correct Twilio auth token as "wrong provider."
 
 ## Status
 
@@ -166,6 +176,6 @@ v0.2 — one file, ~1,200 lines, ~60 of which are the provider table. Built and 
 
 Done: the picker, clipboard paste, live verification, post-paste landing, account-vs-project safety, Vercel push + redeploy, the agent handshake, JSON output.
 
-Not done: no probe for most providers, the prefix table is unverified against vendor docs, macOS only, and it has never been run by anyone who isn't its author. See ROADMAP.md.
+Not done: no probe for most providers, 37 of 70 prefixes still uncited (see [PREFIXES.md](PREFIXES.md)), four known prefix defects unfixed, macOS only, and it has never been run by anyone who isn't its author. See ROADMAP.md.
 
 MIT.
