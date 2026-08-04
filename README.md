@@ -1,5 +1,7 @@
 # 🐦 pigeon
 
+**macOS only.** The nest is the macOS Keychain. Linux and a shared nest are the next slice — and the most useful first PR.
+
 **Keep the API keys of an agent fleet alive.** One command finds every key scattered across your machine, asks each provider which ones are already dead, and lands a fresh one everywhere it belongs.
 
 ```
@@ -142,9 +144,22 @@ The handshake: the agent declares homes and reports `pending`; the human runs `c
 
 ```bash
 git clone https://github.com/Morkeeth/pigeon
+mkdir -p ~/.local/bin                      # a fresh mac does not have this
 ln -s "$PWD/pigeon/coo" ~/.local/bin/coo   # or anywhere on your PATH
-coo
+coo --version                              # 👈 if this says "command not found", see below
 ```
+
+<details>
+<summary><code>coo: command not found</code></summary>
+
+`~/.local/bin` is not on the default macOS `PATH`. Either put it there —
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+```
+
+— or skip the symlink entirely and run `./coo` from the clone. Both work; nothing about pigeon needs to be installed.
+</details>
 
 Requires `zsh`, `curl`, `python3`, and the macOS Keychain. `pbpaste` for clipboard mode, `vercel` (Node 18+) only if you declare a Vercel site. A portable [age](https://github.com/FiloSottile/age) backend for Linux and shared nests is the next slice.
 

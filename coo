@@ -22,6 +22,9 @@ set -euo pipefail
 # locals below are all hoisted out of their loops; this makes the whole class
 # impossible to reintroduce.
 setopt typeset_silent
+# A tool people install from a tap needs to be able to answer "which one do you
+# have?" — without it, a bug report is unactionable. (Cold-start 2026-08-05, #4.)
+VERSION="0.3.0"
 SERVICE="pigeon-nest"
 SELF="${0:t}"
 SELF_PATH="${0:A}"   # resolved at top level, where $0 is the script — inside a function zsh makes $0 the function name
@@ -170,7 +173,21 @@ idx_add() { print "$1" >> "$IDX"; sort -u -o "$IDX" "$IDX"; }
 # citation; 37 do not. Per-prefix status and source URLs are in PREFIXES.md.
 # An uncited prefix was written from memory in v0.1 and has never been confirmed —
 # it may be right, it is simply unproven. Treat a wrong one as a bug report, not a
-# betrayal. PREFIXES.md also lists four known defects in this table, still unfixed.
+# betrayal. PREFIXES.md lists four known defects in this table; two are fixed here.
+#
+# FIXED 2026-08-05 (PREFIXES.md Findings #1 and #2):
+#   twilio     `SK` REMOVED. It is real, but it is the prefix of the API Key SID —
+#              a different credential from the Auth Token this row holds. At two
+#              characters it was also the shortest prefix in the table, so it won
+#              the longest-prefix race for any unrelated value starting "SK" and
+#              named it Twilio. Worse, it made pigeon accept an API Key SID as an
+#              Auth Token without a word. The Auth Token has no documented prefix,
+#              so the honest column is empty: we cannot name it on sight.
+#   cloudflare THREE prefixes ADDED, all vendor-documented. Legacy Cloudflare
+#              tokens carry no prefix and are unaffected — an empty match has
+#              always meant "can't name it", never "reject it".
+# Still open: npm `npm_` and neon `napi_` are contradicted by their own vendor
+# docs and need a real token to settle. They are left as-is rather than guessed.
 REGISTRY='
 openai|OpenAI|1|sk-proj-,sk-svcacct-|OPENAI_API_KEY|API_KEY|https://platform.openai.com/api-keys
 anthropic|Anthropic|1|sk-ant-|ANTHROPIC_API_KEY|API_KEY|https://console.anthropic.com/settings/keys
@@ -204,13 +221,13 @@ airtable|Airtable|5|pat|AIRTABLE_API_KEY|TOKEN|https://airtable.com/create/token
 shopify|Shopify|5|shpat_,shpss_,shpca_,shppa_|SHOPIFY_ACCESS_TOKEN|TOKEN|https://admin.shopify.com
 resend|Resend|3|re_|RESEND_API_KEY|API_KEY|https://resend.com/api-keys
 sendgrid|SendGrid|4|SG.|SENDGRID_API_KEY|API_KEY|https://app.sendgrid.com/settings/api_keys
-twilio|Twilio|4|SK|TWILIO_AUTH_TOKEN|TOKEN|https://console.twilio.com
+twilio|Twilio|4||TWILIO_AUTH_TOKEN|TOKEN|https://console.twilio.com
 gitlab|GitLab|4|glpat-,gldt-|GITLAB_TOKEN|TOKEN|https://gitlab.com/-/user_settings/personal_access_tokens
 npm|npm|4|npm_|NPM_TOKEN|TOKEN|https://www.npmjs.com/settings/~/tokens
 pypi|PyPI|5|pypi-|PYPI_TOKEN|TOKEN|https://pypi.org/manage/account/token/
 docker|Docker Hub|5|dckr_pat_|DOCKER_TOKEN|TOKEN|https://app.docker.com/settings/personal-access-tokens
 aws|AWS|3|AKIA,ASIA|AWS_ACCESS_KEY_ID|ACCESS_KEY|https://console.aws.amazon.com/iam/home#/security_credentials
-cloudflare|Cloudflare|3||CLOUDFLARE_API_TOKEN|TOKEN|https://dash.cloudflare.com/profile/api-tokens
+cloudflare|Cloudflare|3|cfk_,cfut_,cfat_|CLOUDFLARE_API_TOKEN|TOKEN|https://dash.cloudflare.com/profile/api-tokens
 netlify|Netlify|4|nfp_|NETLIFY_AUTH_TOKEN|TOKEN|https://app.netlify.com/user/applications
 railway|Railway|4||RAILWAY_TOKEN|TOKEN|https://railway.app/account/tokens
 fly|Fly.io|4|FlyV1,fm2_|FLY_API_TOKEN|TOKEN|https://fly.io/user/personal_access_tokens
@@ -531,6 +548,26 @@ menu_numbered() {
 # probe that cannot connect must say UNKNOWN and say why.
 http_code() { curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" 2>/dev/null || print 000; }
 
+# The project URL a `sb_secret_` key belongs to, read off this machine. Returns
+# empty when it isn't here, which the caller must report as UNKNOWN rather than
+# guess. Deliberately takes the FIRST match: with several Supabase projects a
+# wrong-project probe returns 401 and would call a perfectly good key DEAD, so
+# ambiguity is capped rather than resolved — one project is the common case and
+# the multi-project answer belongs in sites.json, not in a heuristic.
+supabase_url_nearby() {
+  local f line url
+  for f in ${(f)"$(key_files)"}; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r line; do
+      [[ "$line" == \#* ]] && continue
+      [[ "$line" == *SUPABASE_URL=* ]] || continue
+      url="${line#*=}"; url="${url//[\"\']/}"; url="${url%%[[:space:]]*}"
+      [[ "$url" == https://*.supabase.co* ]] && { print -r -- "$url"; return 0 }
+    done < "$f"
+  done
+  print ""
+}
+
 probe() {
   local v="$1" verdict="UNKNOWN" detail="no probe for this shape" hc
   case "$v" in
@@ -562,6 +599,31 @@ probe() {
         000|"") verdict=UNKNOWN; detail="couldn't reach github — network, not your key" ;;
         *)      verdict=DEAD;    detail="github says invalid (HTTP $hc)" ;;
       esac ;;
+    sb_secret_*)
+      # The one silent failure that actually cost something: a wrong Supabase
+      # secret stored and deployed clean, twice, because this shape had no probe.
+      #
+      # It has no probe because a `sb_secret_` key does not carry its project.
+      # The old JWT did — `ref` sat in the claims, so the key alone was enough.
+      # The new format dropped that, and a key with no project is unaskable.
+      #
+      # But the project URL is not missing, it is just somewhere else: it lives
+      # next to the key, in the same .env pigeon already reads. So look there
+      # rather than declaring the shape unknowable. If it genuinely isn't on the
+      # machine, say WHICH fact is missing — "unknown" that names its own gap is
+      # actionable; "no probe for this shape" is not.
+      local surl; surl=$(supabase_url_nearby)
+      if [[ -z "$surl" ]]; then
+        verdict=UNKNOWN
+        detail="no SUPABASE_URL on this machine — can't ask which project it belongs to"
+      else
+        hc=$(http_code -H "apikey: $v" -H "Authorization: Bearer $v" "${surl%/}/rest/v1/")
+        case "$hc" in
+          200|404) verdict=ALIVE;   detail="supabase (${surl#https://})" ;;
+          000|"")  verdict=UNKNOWN; detail="couldn't reach supabase — network, not your key" ;;
+          *)       verdict=DEAD;    detail="supabase rejected it (HTTP $hc)" ;;
+        esac
+      fi ;;
     eyJ*.*.*)
       local claims; claims=$(print -r -- "$v" | python3 -c "
 import sys,json,base64,time
@@ -723,7 +785,18 @@ import sys, json
 print(json.dumps([l.strip() for l in open(sys.argv[1]) if l.strip()], indent=2))" "$IDX"
     return 0
   fi
-  [[ -s "$IDX" ]] && { c cyan "🐦 the nest:"; sed 's/^/  /' "$IDX"; } || c yellow "the nest is empty."
+  # An empty nest is the FIRST thing a stranger sees — `coo keys` is the safest-
+  # sounding verb, so it is the one they try first. Saying only "the nest is
+  # empty" is a dead end that makes the tool look broken rather than new. Every
+  # other empty state here already teaches the next step; this one did not.
+  # (Cold-start run 2026-08-05, stumble #1.)
+  if [[ -s "$IDX" ]]; then
+    c cyan "🐦 the nest:"; sed 's/^/  /' "$IDX"
+  else
+    c yellow "the nest is empty — nothing gathered yet."
+    c 244 "  land your first key:  \`$SELF\`          pick a provider, paste, done"
+    c 244 "  already have some?    \`$SELF scan\`     find what's on this machine"
+  fi
 }
 cmd_stash() {
   local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF stash <service/NAME> [--stdin]"
@@ -1565,5 +1638,6 @@ case "${1:-}" in
   site)     shift; cmd_site   "$@" ;;
   fan)      shift; cmd_fan    "$@" ;;
   -h|--help|help) usage ;;
+  -V|--version|version) print "pigeon $VERSION" ;;
   *) die "unknown command: $1 (try \`$SELF help\`)" ;;
 esac
