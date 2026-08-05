@@ -1,8 +1,8 @@
 # 🐦 pigeon
 
-**macOS only.** The nest is the macOS Keychain. Linux and a shared nest are the next slice — and the most useful first PR.
+**Your API keys are copied across a dozen `.env` files, and you have no idea which copies still work.** `coo` is one command that finds every copy on your machine, asks each provider which keys are actually dead or out of credit, and replaces them everywhere at once.
 
-**Keep the API keys of an agent fleet alive.** One command finds every key scattered across your machine, asks each provider which ones are already dead, and lands a fresh one everywhere it belongs.
+**macOS only right now** — keys are stored in the macOS Keychain. [Linux support is the first thing we want help with →](https://github.com/Morkeeth/pigeon/issues)
 
 ```
 $ coo test
@@ -10,8 +10,8 @@ $ coo test
 
   anthropic/API_KEY      ALIVE     anthropic
   openrouter/API_KEY     LOW       only $2.14 left
-  litmus/SUPABASE_KEY    DEAD      supabase says invalid (HTTP 401)
-  taste-machine/APP_PW   UNKNOWN   no probe for this shape
+  supabase/SERVICE_KEY   DEAD      supabase says invalid (HTTP 401)
+  sendgrid/API_KEY       UNKNOWN   no probe for this shape
 
   2 alive · 1 dead · 1 unverified
   a dead key that still sits in a config is an agent that fails silently.
@@ -48,8 +48,13 @@ coo pending                  what still needs a human paste
 coo delete <ref>             remove a key
 ```
 
-A `<ref>` is `service/NAME` — `openrouter/API_KEY`, `stripe/WEBHOOK_SECRET`.
-The older names (`check`, `nest`, `gather`, `stash`, `fan`, `remove`) still work.
+Two words used throughout: a **`<ref>`** is one key, written `service/NAME` — `openrouter/API_KEY`, `stripe/WEBHOOK_SECRET`. The **nest** is where pigeon keeps them: on macOS, your Keychain.
+
+<details>
+<summary>older command names still work</summary>
+
+`check` → `test`, `nest` → `keys`, `gather` → `scan`, `fan` → `push`, `remove` (or `rm`) → `delete`, and `stash` is the non-interactive form of `add`. Verified against the dispatch table in `coo`.
+</details>
 
 ### Pick
 
@@ -187,7 +192,7 @@ The pass also found four defects, all listed in [PREFIXES.md](PREFIXES.md#findin
 
 ## Status
 
-v0.2 — one file, ~1,200 lines, ~60 of which are the provider table. Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet, and driven end-to-end against real keys and real production.
+v0.3 — one file, 1,643 lines, ~60 of which are the provider table. Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet, and driven end-to-end against real keys and real production.
 
 Done: the picker, clipboard paste, live verification, post-paste landing, account-vs-project safety, Vercel push + redeploy, the agent handshake, JSON output.
 

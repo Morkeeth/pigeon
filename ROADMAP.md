@@ -46,11 +46,10 @@ and is the obvious first community PR.
 
 Seven slices, ordered by what unblocks the most. Each ships and verifies alone.
 
-**1. Cold-start reconnaissance** — become the stranger before designing for them.
-Fresh clone into a throwaway `HOME`: no Keychain entries, no `~/.local/bin`, no `sites.json`.
-Record every stumble verbatim.
-- done when: a numbered list of real stumbles exists, each with the exact output the stranger saw
-- size **S** · **risk: this is the unknown.** Slices 4–5 are guesswork until it runs — expect it to rewrite them
+**1. ✅ Cold-start reconnaissance** — become the stranger before designing for them. **Done 2026-08-05**, twice:
+- **Install path** → [COLD-START-2026-08-05.md](COLD-START-2026-08-05.md). Six stumbles, four fixed (`keys` dead-end, `mkdir -p` missing from the install line, PATH, no `--version`, macOS-only buried).
+- **Comprehension path** → the README was read cold by someone who had never heard of an agent fleet. It lost them at *sentence two*: "The nest is the macOS Keychain" used an undefined word before saying what the tool does, and `coo` appeared in the demo block 138 lines before anything connected it to the repo name. Opening rewritten value-first; `nest` and `<ref>` now defined at first use; the demo's sample refs no longer use private project names. Status block's `v0.2 / ~1,200 lines` re-derived to `v0.3 / 1,643`.
+- **Still true:** nobody outside has run it, because **the repo is still private** (slice 7).
 
 **2. Correctness debt** — never ship a known false-positive.
 The four defects in [PREFIXES.md](PREFIXES.md), plus the missing `sb_secret_` probe (a silent
@@ -74,15 +73,34 @@ Nothing gathered · probe can't reach · key rejected · wrong provider · Keych
 - done when: all five hit on purpose and screenshotted, none reading like a stack trace
 - size **M**
 
-**6. Repo surface** — what people judge before they install.
-README line 1 = macOS-only. `CONTRIBUTING.md` aiming the 37 uncited prefixes at the community
-(that is what the one-line-no-code table was built for). Issue templates, LICENSE, a real demo cast.
+**6. Repo surface** — what people judge before they install. *Partly done.*
+- ~~README opening a stranger can parse in 30s~~ — done 2026-08-05 (slice 1 above).
+- **The Linux issue.** Not "help wanted, Linux?" — a scoped issue naming the ~4 `security`-command call sites in `coo` that are the entire macOS surface, the [age](https://github.com/FiloSottile/age) backend contract they must satisfy, and how to test it with no Keychain. A stranger must be able to start it without asking a question. **This is the one that unblocks a contributor.**
+- **`good first issue` × 2, and only where the work is genuinely first.** The 37 uncited prefixes are the honest candidate — one line, no code, a vendor doc URL as the receipt. The Twilio `SK` defect is the other. Nothing gets the label to pad the count.
+- `CONTRIBUTING.md` — how to add a provider row, and what evidence a prefix claim needs.
+- Repo has **no description topics, no issues, and three dated session notes at root** (`CLOSEOUT-*`, `COLD-START-*`). Move the notes to `docs/notes/`; add topics.
 - done when: someone who never installs it can tell in 10s what it does and whether it runs on their machine
 - size **M**
 
 **7. Flip public — and re-run slice 1 as the gate.**
+`gh repo view` on 2026-08-05: **`"visibility":"PRIVATE"`, 0 stars, no topics.** Every finding above is theoretical until this flips — there is no stranger, because there is no door.
 - done when: repo is public and a second cold-start produces zero stumbles from the slice-1 list
 - size **S**
+
+**8. Tell someone.** A public repo nobody links to is a private repo with extra steps.
+Ranked by fit, not reach — the audience is people who already run several agents locally, not general devs:
+
+| Where | Why it fits | Cost of getting it wrong |
+|---|---|---|
+| **r/ClaudeCode** (dedicated, most active) and r/ClaudeAI | Exactly the people running fleets of agents that hold keys | Low. Self-promo rules apply — lead with the problem, not the repo |
+| **`hesreallyhim/awesome-claude-code`** — the canonical hand-curated list | A PR that gets *reviewed* by a human is a real verdict, unlike an upvote | Rejection is free information |
+| **Show HN** | Widest reach; a one-file zsh tool with an honest "not done" list is HN-shaped | **One shot.** Do not fire this before slices 2, 3 and 6 |
+| **Lobsters** | Tighter technical read than HN | Invite-only; needs an account first |
+| **r/commandline** | The install-and-try crowd | Low |
+
+- The market read that makes this non-obvious: 2026 coverage of agent key management is **all enterprise/multi-tenant** ([Zuplo](https://zuplo.com/blog/managing-api-keys-for-ai-agents), [WorkOS](https://workos.com/blog/ai-agent-secrets-management)) — provisioning and revocation for *someone else's* agents. Nothing addresses the individual running five agents on their own laptop. That gap is the post.
+- done when: one channel posted, and the first response from a stranger is recorded — including if it is silence
+- size **S** · risk: **posting before slice 3 (`brew`) burns the one Show HN.** Order matters more than speed.
 
 **Deferred on purpose:** the 37 uncited prefixes — proven 2026-08-01 to block no one, and
 community-shaped work by design. Linux/portable backend → v1.1.
