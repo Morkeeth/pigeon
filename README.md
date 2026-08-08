@@ -174,7 +174,11 @@ Two different claims, and the difference is the honest part.
 
 **Recognised — 60 providers.** One line each in the `REGISTRY` table at the top of `coo`: display name, key prefixes, env-var convention, default ref, console URL. That table powers the picker, the wrong-provider catch, and the retrieval guides. Adding a provider is **one line and no code**.
 
-**Probed live — 5 key shapes.** OpenRouter (returns remaining credit), Anthropic, OpenAI, GitHub, and any JWT (decoded locally, shows the role). Everything else is stored and reported `UNKNOWN` — pigeon says it can't check rather than implying it did. Notably there is **no probe for `sb_secret_`**, so a wrong Supabase secret will store and deploy without complaint.
+**Probed live — 6 key shapes.** OpenRouter (returns remaining credit), Anthropic, OpenAI, GitHub, Supabase `sb_secret_`, and any JWT (decoded locally, shows the role). Everything else is stored and reported `UNKNOWN` — pigeon says it can't check rather than implying it did.
+
+The Supabase one is worth a sentence, because a `sb_secret_` key **does not carry its own project** — the old JWT had `ref` in its claims, the new format dropped it, so the key alone is unaskable. pigeon looks for a `SUPABASE_URL` next to it in the same `.env` it already read. If there isn't one it says *which fact is missing* — `no SUPABASE_URL on this machine — can't ask which project it belongs to` — rather than the useless `no probe for this shape`. That is the shape every `UNKNOWN` here should eventually take.
+
+**54 of 60 providers have no probe at all**, and today they all say `no probe for this shape`. That is the honest gap, and it is the next slice.
 
 A probe that can't reach the provider reports `UNKNOWN — couldn't reach anthropic, network not your key`, never `DEAD`. Telling someone their live key is dead is how a good key gets revoked by mistake.
 
