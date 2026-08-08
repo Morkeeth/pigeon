@@ -117,5 +117,17 @@ paths = [
   '''package-lock\.json$''',
 ]
 regexes = [
+  # NOTE: these match against the SECRET, not the whole line — that is gitleaks'
+  # default regexTarget. So a line reading `example key AIzaSy…` is NOT allowlisted
+  # by the word "example" appearing on it; only the captured value is tested.
+  # Deliberate: widening this to the line would let a real key hide behind the word
+  # "example" anywhere on it.
   '''(?i)(example|sample|placeholder|dummy|redacted|your[_-]?key|xxx+|<[^>]+>)''',
+  # Google's own published example key, cited verbatim in PREFIXES.md row 13 as the
+  # evidence that `AIza` is a real prefix. Verified 2026-08-08 against the cited page,
+  # https://docs.cloud.google.com/docs/authentication/api-keys — "The API key string is
+  # an encrypted string, for example, AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe."
+  # Pinned to the exact string on purpose: this exempts one documented literal, not the
+  # `AIza` shape, so a real Google key in this repo would still fire.
+  '''^AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe$''',
 ]
