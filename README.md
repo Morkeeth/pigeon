@@ -1,6 +1,6 @@
 # 🐦 pigeon
 
-**Your API keys are copied across a dozen `.env` files, and you have no idea which copies still work.** `coo` is one command that finds every copy on your machine, asks each provider which keys are actually dead or out of credit, and replaces them everywhere at once.
+**Your API keys are copied across a dozen `.env` files, and you have no idea which copies still work.** pigeon is one command — `coo` — that finds every copy on your machine, asks each provider which keys are actually dead or out of credit, and replaces them everywhere at once.
 
 **macOS only right now** — keys are stored in the macOS Keychain. [Linux support is the first thing we want help with →](https://github.com/Morkeeth/pigeon/issues)
 
@@ -149,9 +149,9 @@ The handshake: the agent declares homes and reports `pending`; the human runs `c
 
 ```bash
 git clone https://github.com/Morkeeth/pigeon
-mkdir -p ~/.local/bin                      # a fresh mac does not have this
-ln -s "$PWD/pigeon/coo" ~/.local/bin/coo   # or anywhere on your PATH
-coo --version                              # 👈 if this says "command not found", see below
+cd pigeon
+./coo install     # symlinks into ~/.local/bin, and says so if PATH needs one line
+coo --version     # 👈 if this says "command not found", see below
 ```
 
 <details>
