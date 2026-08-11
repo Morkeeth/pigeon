@@ -1223,7 +1223,8 @@ key_flow() {
 cmd_wizard() {
   if [[ ! -t 0 && -z "${COO_TEST:-}" ]]; then
     c cyan "🐦 hi. run \`coo\` in a real terminal for the guided flow."
-    print "  or use verbs directly: coo gather · coo check · coo stash <ref> · coo help"
+    print "  or use verbs directly: coo scan · coo test · coo add <ref> · coo help"
+    print "  for agents: coo test --json · coo pending --json · coo keys --json"
     return 0
   fi
   c cyan "🐦 pigeon — let's sort your keys."
