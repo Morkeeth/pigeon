@@ -1,10 +1,10 @@
 #!/bin/zsh
 # pigeon — carrier pigeon for your API keys. gather them, check them, keep them alive.
 #
-#   coo gather   scan the machine, find every scattered key, show divergence
-#   coo check    ask each provider: alive? dead? drained? wrong role?
+#   coo scan     scan the machine, find every scattered key, show divergence
+#   coo test     ask each provider: alive? dead? drained? wrong role?
 #   coo nest     list what's gathered (names only, never values)
-#   coo fan      push the canonical value to every place a key should live
+#   coo push     push the canonical value to every place a key should live
 #
 # storage is a solved problem (1Password, SOPS, age). pigeon does NOT reinvent a
 # vault. it does the thing none of them do: keep a heterogeneous AGENT FLEET's
@@ -709,7 +709,7 @@ cmd_gather() {
     c 244 "  to fix a diverged key: run \`$SELF\`, pick it, paste the good value once —"
     c 244 "  pigeon will offer to overwrite every stale copy it just listed."
   else
-    c 244 "  run \`$SELF check\` to see which of these are already dead."
+    c 244 "  run \`$SELF test\` to see which of these are already dead."
   fi
   rm -f "$tmp"
 }
@@ -728,7 +728,7 @@ cmd_check() {
   if [[ ! -s "$IDX" ]]; then
     (( json )) && { print '{"alive":0,"dead":0,"unverified":0,"keys":[]}'; return 0 }
     c yellow "the nest is empty — nothing to check yet."
-    print "  set up your first key: run \`$SELF\` and pick 1, or \`$SELF stash openrouter/API_KEY\`"
+    print "  set up your first key: run \`$SELF\` and pick 1, or \`$SELF add openrouter/API_KEY\`"
     return 0
   fi
   (( json )) || { c cyan "🐦 asking each provider if the key still works…"; print "" }
@@ -799,10 +799,10 @@ print(json.dumps([l.strip() for l in open(sys.argv[1]) if l.strip()], indent=2))
   fi
 }
 cmd_stash() {
-  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF stash <service/NAME> [--stdin]"
+  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF add <service/NAME> [--stdin]"
   local v
   if [[ "${2:-}" == "--stdin" || ! -t 0 ]]; then
-    # the agent path: `printf '%s' "$KEY" | coo stash openrouter/API_KEY --stdin`
+    # the agent path: `printf '%s' "$KEY" | coo add openrouter/API_KEY --stdin`
     IFS= read -r v || true
   else
     print -n "paste value for $ref (hidden): "; read -rs v; print ""
@@ -1155,7 +1155,7 @@ cmd_rotate() {
 }
 
 cmd_remove() {
-  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF remove <service/NAME>"
+  local ref="${1:-}"; [[ -n "$ref" ]] || die "usage: $SELF delete <service/NAME>"
   in_nest "$ref" || { c yellow "  $ref is not in the nest."; return 0 }
   print -n "  remove $ref? the value is deleted from your keychain. [y/N] ▸ "
   local a; read -r a || a=""
@@ -1223,7 +1223,8 @@ key_flow() {
 cmd_wizard() {
   if [[ ! -t 0 && -z "${COO_TEST:-}" ]]; then
     c cyan "🐦 hi. run \`coo\` in a real terminal for the guided flow."
-    print "  or use verbs directly: coo gather · coo check · coo stash <ref> · coo help"
+    print "  or use verbs directly: coo scan · coo test · coo add <ref> · coo help"
+    print "  for agents: coo test --json · coo pending --json · coo keys --json"
     return 0
   fi
   c cyan "🐦 pigeon — let's sort your keys."
@@ -1291,7 +1292,7 @@ cmd_setup() {
   c cyan "🐦 hi. let's sort out your keys."; print ""
   if [[ ! -t 0 ]]; then
     c yellow "  (this is an interactive flow — run \`coo\` in a real terminal.)"
-    print "  or use the verbs directly: coo gather · coo check · coo stash <ref>"
+    print "  or use the verbs directly: coo scan · coo test · coo add <ref>"
     return 0
   fi
 
@@ -1340,7 +1341,7 @@ cmd_setup() {
     [[ -z "$fresh" ]] && { c 244 "     skipped."; continue; }
     vres=$(probe "$fresh"); vv="${vres%%|*}"
     if [[ "$vv" == DEAD || "$vv" == EXPIRED ]]; then
-      c red "     that one's also rejected by the provider — not stored. try again with \`coo stash $s/API_KEY\`."
+      c red "     that one's also rejected by the provider — not stored. try again with \`coo add $s/API_KEY\`."
       continue
     fi
     kc_set "$s/API_KEY" "$fresh"; idx_add "$s/API_KEY"
@@ -1384,7 +1385,7 @@ cmd_setup() {
 
   print ""; c cyan "🐦 your nest:"
   cmd_check 2>/dev/null || true
-  print ""; c 244 "  run \`coo\` anytime to re-check, or \`coo fan <ref>\` to push a key everywhere it lives."
+  print ""; c 244 "  run \`coo\` anytime to re-check, or \`coo push <ref>\` to push a key everywhere it lives."
 }
 
 # ---- vercel: resolve a CLI that will actually run ---------------------------
@@ -1411,7 +1412,7 @@ vercel_ready() {
 }
 
 # ---- fan: one paste → every place a key lives -------------------------------
-# the copy-paste killer. declare where a key lives once, then `coo fan <ref>`
+# the copy-paste killer. declare where a key lives once, then `coo push <ref>`
 # writes the canonical nest value to every declared .env, backing up what it
 # replaced. this is the fix for the bug that started pigeon: four copies, one
 # goes stale, an agent dies quiet. values are never printed — only fingerprints.
@@ -1450,8 +1451,8 @@ cmd_fan() {
   local ref="${1:-}" a2
   local arg; for arg in "$@"; do [[ "$arg" == "--redeploy" ]] && REDEPLOY=1; done
   [[ "$ref" == "--redeploy" ]] && ref=""
-  [[ -n "$ref" ]] || die "usage: $SELF fan <service/NAME>   (declare sites first: $SELF site …)"
-  local can; can=$(kc_get "$ref") || die "no key stored for $ref — stash it first: $SELF stash $ref"
+  [[ -n "$ref" ]] || die "usage: $SELF push <service/NAME>   (declare sites first: $SELF site …)"
+  local can; can=$(kc_get "$ref") || die "no key stored for $ref — add it first: $SELF add $ref"
 
   c cyan "🐦 fanning $ref ($(fp "$can")) to every declared site…"; print ""
   local wrote=0 same=0 miss=0
@@ -1537,7 +1538,7 @@ for x in d.get(os.environ['REF'], []):
       c cyan "  vercel: $vvar → $venv (${vcwd/#$HOME/~})…"
       if (( ! vok )); then
         c red "  ✗ can't run the vercel CLI: $VERCEL_WHY"
-        c 244 "    fix that, then: $SELF fan $ref"
+        c 244 "    fix that, then: $SELF push $ref"
         continue
       fi
       # Vercel CLI >= 55 turns on --non-interactive by itself "when an agent is
@@ -1569,7 +1570,7 @@ for x in d.get(os.environ['REF'], []):
             print -n "    this only goes live on the next build. redeploy now? [y/N] ▸ "
             read -r a2 || a2=""; [[ "${a2:l}" == y* ]] && dep=1
           else
-            c 244 "    not live until the next build — \`$SELF fan $ref --redeploy\` or deploy yourself"
+            c 244 "    not live until the next build — \`$SELF push $ref --redeploy\` or deploy yourself"
           fi
           if (( dep )); then
             c cyan "    deploying $venv…"
