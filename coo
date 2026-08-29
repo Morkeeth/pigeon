@@ -643,11 +643,28 @@ print(f\"EXPIRED|jwt role={role}, expired\" if exp and exp<time.time() else f\"A
 # the post-paste "where does this already live?" question can never disagree.
 # (N) = nullglob per pattern: a machine with no ~/CODE is a valid machine, and
 # an unmatched glob must expand to nothing rather than abort the scan.
+# Where code lives is a convention, not a fact. `~/CODE` is one person's habit;
+# a stranger uses ~/dev, ~/src, ~/work, ~/Projects. Scanning one root and then
+# printing "no keys found" is a FALSE CLEAN BILL — the tool says "you are tidy"
+# when it means "I did not look where you keep things", which is the one answer
+# a key-divergence tool must never give. Same rule as the Supabase probe: an
+# unknown that names its own gap is actionable, a bare negative is not.
+# Override with COO_ROOTS, colon-separated.
+key_roots() {
+  if [[ -n "${COO_ROOTS:-}" ]]; then print -l -- ${(s.:.)COO_ROOTS}; return 0; fi
+  print -l -- $HOME/CODE $HOME/code $HOME/dev $HOME/src $HOME/work \
+              $HOME/Projects $HOME/projects $HOME/repos $HOME/git
+}
+
 key_files() {
-  local -a f
+  local -a f r
+  local root
   f=( $HOME/.zshrc(N) $HOME/.bashrc(N) $HOME/.zshenv(N)
-      $HOME/CODE/*/.env(N) $HOME/CODE/*/.env.*(N) $HOME/CODE/*/.env.local(N)
       $HOME/.claude/credentials/*.env(N) )
+  for root in ${(f)"$(key_roots)"}; do
+    [[ -d "$root" ]] || continue
+    f+=( $root/*/.env(N) $root/*/.env.*(N) $root/*/.env.local(N) )
+  done
   f=( ${(u)f} )                                  # .env.local matches two globs
   f=( ${f:#*.bak-pigeon} )                       # never re-read our own backups
   f=( ${f:#*.(example|sample|template)} )        # placeholders are not copies
@@ -676,7 +693,22 @@ cmd_gather() {
       print "$svc\t$(fp "$value")\t$name\t${f/#$HOME/~}" >> "$tmp"
     done < "$f"
   done
-  [[ -s "$tmp" ]] || { c yellow "no keys found. a tidy nest, or an empty one."; rm -f "$tmp"; return 0; }
+  # Name where we looked. "no keys found" alone is indistinguishable from
+  # "your code is somewhere I never opened", and the second one is a lie.
+  if [[ ! -s "$tmp" ]]; then
+    local -a searched; searched=( )
+    local root
+    for root in ${(f)"$(key_roots)"}; do [[ -d "$root" ]] && searched+=( "${root/#$HOME/~}" ); done
+    c yellow "no keys found."
+    if (( ${#searched} )); then
+      print "  looked in: ${(j:, :)searched} (and your shell profiles)"
+      print "  keep code somewhere else? COO_ROOTS=~/path/to/code coo scan"
+    else
+      print "  none of the usual code directories exist here."
+      print "  point pigeon at yours: COO_ROOTS=~/path/to/code coo scan"
+    fi
+    rm -f "$tmp"; return 0
+  fi
 
   local svc_list; svc_list=$(cut -f1 "$tmp" | sort -u)
   local total; total=$(wc -l < "$tmp" | tr -d ' ')
