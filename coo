@@ -569,7 +569,21 @@ supabase_url_nearby() {
 }
 
 probe() {
-  local v="$1" verdict="UNKNOWN" detail="no probe for this shape" hc
+  local v="$1" ref="${2-}" verdict="UNKNOWN" detail="no probe for this shape" hc
+  # Some providers issue keys with no distinctive prefix. A shape-only probe must
+  # call those unknown forever, which is the failure this tool exists to end. When
+  # the value cannot say who it belongs to, the ref can: parallel/API_KEY does.
+  case "$ref" in
+    parallel/*)
+      hc=$(http_code -X POST -H "x-api-key: $v" -H 'Content-Type: application/json' \
+           -d '{"objective":"ping","search_queries":["ping"],"processor":"base","max_results":1}' \
+           https://api.parallel.ai/v1beta/search)
+      case "$hc" in
+        200)    print -r -- "ALIVE|parallel"; return 0 ;;
+        000|"") print -r -- "UNKNOWN|couldn't reach parallel — network, not your key"; return 0 ;;
+        *)      print -r -- "DEAD|parallel says invalid (HTTP $hc)"; return 0 ;;
+      esac ;;
+  esac
   case "$v" in
     sk-or-v1-*)
       local r; r=$(curl -s -m 15 -H "Authorization: Bearer $v" https://openrouter.ai/api/v1/credits 2>/dev/null)
@@ -591,6 +605,18 @@ probe() {
         200)    verdict=ALIVE;   detail=openai ;;
         000|"") verdict=UNKNOWN; detail="couldn't reach openai — network, not your key" ;;
         *)      verdict=DEAD;    detail="openai says invalid (HTTP $hc)" ;;
+      esac ;;
+    AQ.*|AIza*)
+      # Google AI Studio. The classic shape is AIza…; keys issued from AI Studio in
+      # 2026 carry an AQ. prefix instead. Both authenticate the same endpoint, so
+      # probe both rather than calling the newer one unknown (Oscar, 6 Sep 2026:
+      # the key was real, the shape was the only thing that looked wrong).
+      hc=$(http_code -H "x-goog-api-key: $v" https://generativelanguage.googleapis.com/v1beta/models)
+      case "$hc" in
+        200)    verdict=ALIVE;   detail="google ai studio" ;;
+        000|"") verdict=UNKNOWN; detail="couldn't reach google — network, not your key" ;;
+        403)    verdict=DEAD;    detail="google says forbidden (HTTP 403) — key disabled or API not enabled" ;;
+        *)      verdict=DEAD;    detail="google says invalid (HTTP $hc)" ;;
       esac ;;
     ghp_*|github_pat_*|gho_*)
       hc=$(http_code -H "Authorization: Bearer $v" https://api.github.com/user)
@@ -742,7 +768,7 @@ cmd_check() {
       (( json )) || { printf "  %-30s " "$ref"; c red "MISSING (indexed, not in keychain)"; }
       continue
     fi
-    res=$(probe "$v"); verdict="${res%%|*}"; detail="${res#*|}"
+    res=$(probe "$v" "$ref"); verdict="${res%%|*}"; detail="${res#*|}"
     case "$verdict" in
       ALIVE) color=green; alive=$((alive+1)) ;;
       LOW)   color=yellow; alive=$((alive+1)) ;;
@@ -1099,7 +1125,7 @@ paste_and_land() {
     c green "  ✓ jwt role: service_role — the right one."
   fi
 
-  local res verdict detail; res=$(probe "$v"); verdict="${res%%|*}"; detail="${res#*|}"
+  local res verdict detail; res=$(probe "$v" "$ref"); verdict="${res%%|*}"; detail="${res#*|}"
   case "$verdict" in
     DEAD|EXPIRED) c red "  ✗ the provider rejects that key ($detail). not stored — grab a fresh one and retry."; return 1 ;;
     ALIVE|LOW)    c green "  ✓ verified live with the provider: $detail" ;;
@@ -1326,7 +1352,7 @@ cmd_setup() {
       printf "  %-12s " "$s"; c 244 "not found"
       continue
     fi
-    res=$(probe "$val"); verdict="${res%%|*}"; detail="${res#*|}"
+    res=$(probe "$val" "$s/API_KEY"); verdict="${res%%|*}"; detail="${res#*|}"
     case "$verdict" in
       ALIVE) printf "  %-12s " "$s"; print -P "%F{green}ALIVE%f  $detail"; continue ;;
       LOW)   printf "  %-12s " "$s"; print -P "%F{yellow}LOW%f    $detail — worth replacing" ;;
@@ -1338,7 +1364,7 @@ cmd_setup() {
     print -n "  └─ paste a fresh $s key here (hidden, or Enter to skip) ▸ "
     read -rs fresh; print ""
     [[ -z "$fresh" ]] && { c 244 "     skipped."; continue; }
-    vres=$(probe "$fresh"); vv="${vres%%|*}"
+    vres=$(probe "$fresh" "$s/API_KEY"); vv="${vres%%|*}"
     if [[ "$vv" == DEAD || "$vv" == EXPIRED ]]; then
       c red "     that one's also rejected by the provider — not stored. try again with \`coo stash $s/API_KEY\`."
       continue
