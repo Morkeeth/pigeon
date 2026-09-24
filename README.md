@@ -19,7 +19,7 @@ $ coo test
 
 ![coo test against seven fake keys: five DEAD, two UNKNOWN, exit 1](docs/coo-test.gif)
 
-*Recorded against fake keys in a throwaway home directory. Every provider refuses them, and pigeon says so.*
+*Recorded against seven fake keys in a throwaway home directory. Five are refused as DEAD. Two are UNKNOWN: SendGrid has no probe, and the fake Supabase project cannot be reached. pigeon says which is which.*
 
 ---
 
@@ -73,11 +73,12 @@ No fzf, no config, no dependencies — raw zsh against `/dev/tty`, speaking sync
 If the key is already on your clipboard, that *is* the paste:
 
 ```
-📋 your clipboard holds a stripe key — ffa6fa48, 34 chars
-use it for stripe/SECRET_KEY? [Y/n] ▸
+📋 read your clipboard for stripe/SECRET_KEY? [y/N] ▸ y
+📋 clipboard: stripe, sk_live_…4f2a, 34 chars
+store it as stripe/SECRET_KEY? [y/N] ▸ y
 ```
 
-One keypress. The value is never printed — you get the provider it looks like, its length and its fingerprint. The retrieval steps and console link only appear when the clipboard has nothing usable, so they stop being a toll booth.
+pigeon asks before it reads the clipboard, because the clipboard can hold anything. Then it shows the provider the value looks like and a masked fingerprint (a short prefix and the last 4 characters), and asks again. Only `y` or `yes` counts. Enter means no. Ctrl+C or end of input stops the run before anything is written. The retrieval steps and console link appear when you say no or the clipboard has nothing usable.
 
 **pigeon names a value from its prefix.** Paste an `sk-or-v1-…` into the OpenAI slot and it stops you — *"that looks like an OpenRouter key, not openai"* — before storing anything. Same catch that saves you from Supabase's publishable row when you wanted a secret key, generalised to every provider in the table.
 
@@ -184,7 +185,7 @@ Two different claims, and the difference is the honest part.
 
 The Supabase one is worth a sentence, because a `sb_secret_` key **does not carry its own project** — the old JWT had `ref` in its claims, the new format dropped it, so the key alone is unaskable. pigeon looks for a `SUPABASE_URL` next to it in the same `.env` it already read. If there isn't one it says *which fact is missing* — `no SUPABASE_URL on this machine — can't ask which project it belongs to` — rather than the useless `no probe for this shape`. That is the shape every `UNKNOWN` here should eventually take.
 
-**54 of 60 providers have no probe at all**, and today they all say `no probe for this shape`. That is the honest gap, and it is the next slice.
+**54 of the 60 recognised providers have no probe at all**, and today they all say `no probe for this shape`. (Parallel is probed by ref and is not one of the 60 rows in the table.) That is the honest gap, and it is the next slice.
 
 A probe that can't reach the provider reports `UNKNOWN` and says the network failed, not your key. It never reports `DEAD` for that. Telling someone their live key is dead is how a good key gets revoked by mistake.
 

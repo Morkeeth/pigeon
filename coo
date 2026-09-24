@@ -73,13 +73,56 @@ tty_release() {
   TTY_DIRTY=0
   return 0
 }
-trap 'tty_release' EXIT INT TERM HUP
+# A signal must END the run, not just tidy the terminal. With only tty_release on
+# INT, Ctrl+C at a prompt returned into the flow as an empty answer, and the next
+# line could write a key to the keychain. Every signal now cleans up and exits
+# before any later write can run. TMPS holds any temp file that may carry a value.
+typeset -ga TMPS; TMPS=()
+cleanup() { tty_release; (( ${#TMPS} )) && rm -f -- $TMPS 2>/dev/null; TMPS=(); return 0; }
+on_signal() { trap - INT TERM HUP; cleanup; print -u2 ""; print -u2 "  interrupted."; exit "$1"; }
+trap 'cleanup' EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
 # Same visible text as a plain URL, so a terminal without OSC 8 loses nothing.
 url_line() { printf '\e[38;5;244m%s' "$1"; osc8 "$2"; printf '\e[39m\n'; }
 
 c()   { print -P "%F{$1}$2%f"; }
 die() { print -u2 "✗ $*"; exit 1; }
 fp()  { printf '%s' "$1" | shasum | cut -c1-8; }   # identity, never exposure
+
+# Consent before a write. Only a typed "y" or "yes" is yes. Enter, "n", "yolo"
+# and anything else are no. No answer at all (EOF) ends the run with status 1.
+# A terminal left without isig turns Ctrl+C and Ctrl+D into bytes in the line,
+# so those bytes end the run with status 130 too. Nothing is written after that.
+ask_yes() {
+  local a=""
+  print -n -- "$1 [y/N] ▸ "
+  [[ -t 0 ]] && { stty isig 2>/dev/null || true; }
+  if ! IFS= read -r a; then
+    print ""; print -u2 "  no answer, nothing stored."; exit 1
+  fi
+  if [[ "$a" == *$'\x03'* || "$a" == *$'\x04'* ]]; then
+    print -u2 "  interrupted, nothing stored."; exit 130
+  fi
+  a="${a//[[:space:]]/}"
+  [[ "${a:l}" == (y|yes) ]]
+}
+
+# What a stored value looks like on screen: a short prefix and the last 4.
+# The prefix is the provider's public prefix when it has one, capped at 8 chars,
+# and 4 chars otherwise, so no more than 12 characters of any value are shown.
+mask_key() {
+  local v="$1" svc="${2:-}" pre="" i p
+  if [[ -n "$svc" ]] && i=$(reg_idx "$svc" 2>/dev/null); then
+    for p in ${(s:,:)REG_PRE[$i]}; do
+      [[ "$v" == "$p"* && ${#p} -gt ${#pre} ]] && pre="$p"
+    done
+  fi
+  [[ -z "$pre" ]] && pre="${v[1,4]}"
+  (( ${#pre} > 8 )) && pre="${pre[1,8]}"
+  print -r -- "${pre}…${v[-4,-1]}"
+}
 
 usage() {
   cat <<'EOF'
@@ -550,7 +593,14 @@ menu_numbered() {
 # `|| print 000` produced "000000", which matched no `000|""` arm and fell through
 # to DEAD. Found by the 2026-09-24 stranger test: an unreachable Supabase host was
 # reported DEAD, the exact false verdict the comment above forbids.
-http_code() { local c; c=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" 2>/dev/null) || true; print -r -- "${c:-000}"; }
+# A curl killed by a signal (status 128+n) is an interruption, not a network
+# failure. Pass the status up so the caller aborts instead of storing on UNKNOWN.
+http_code() {
+  local c rc=0
+  c=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" 2>/dev/null) || rc=$?
+  (( rc >= 128 )) && exit "$rc"
+  print -r -- "${c:-000}"
+}
 
 # The project URL a `sb_secret_` key belongs to, read off this machine. Returns
 # empty when it isn't here, which the caller must report as UNKNOWN rather than
@@ -581,7 +631,7 @@ probe() {
     parallel/*)
       hc=$(http_code -X POST -H "x-api-key: $v" -H 'Content-Type: application/json' \
            -d '{"objective":"ping","search_queries":["ping"],"processor":"base","max_results":1}' \
-           https://api.parallel.ai/v1beta/search)
+           https://api.parallel.ai/v1beta/search) || exit $?
       case "$hc" in
         200)    print -r -- "ALIVE|parallel"; return 0 ;;
         000|"") print -r -- "UNKNOWN|couldn't reach parallel — network, not your key"; return 0 ;;
@@ -590,21 +640,22 @@ probe() {
   esac
   case "$v" in
     sk-or-v1-*)
-      local r; r=$(curl -s -m 15 -H "Authorization: Bearer $v" https://openrouter.ai/api/v1/credits 2>/dev/null)
+      local r rrc=0; r=$(curl -s -m 15 -H "Authorization: Bearer $v" https://openrouter.ai/api/v1/credits 2>/dev/null) || rrc=$?
+      (( rrc >= 128 )) && exit "$rrc"
       if [[ "$r" == *'"total_credits"'* ]]; then
         local rem; rem=$(print -r -- "$r" | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(f\"{d['total_credits']-d['total_usage']:.2f}\")" 2>/dev/null)
         if [[ "${rem%%.*}" -lt 5 ]] 2>/dev/null; then verdict=LOW; detail="only \$$rem left"; else verdict=ALIVE; detail="\$$rem left"; fi
       elif [[ -z "$r" ]]; then verdict=UNKNOWN; detail="couldn't reach openrouter — network, not your key"
       else verdict=DEAD; detail="openrouter rejected it"; fi ;;
     sk-ant-*)
-      hc=$(http_code -H "x-api-key: $v" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models)
+      hc=$(http_code -H "x-api-key: $v" -H 'anthropic-version: 2023-06-01' https://api.anthropic.com/v1/models) || exit $?
       case "$hc" in
         200)    verdict=ALIVE;   detail=anthropic ;;
         000|"") verdict=UNKNOWN; detail="couldn't reach anthropic — network, not your key" ;;
         *)      verdict=DEAD;    detail="anthropic says invalid (HTTP $hc)" ;;
       esac ;;
     sk-proj-*|sk-svcacct-*)
-      hc=$(http_code -H "Authorization: Bearer $v" https://api.openai.com/v1/models)
+      hc=$(http_code -H "Authorization: Bearer $v" https://api.openai.com/v1/models) || exit $?
       case "$hc" in
         200)    verdict=ALIVE;   detail=openai ;;
         000|"") verdict=UNKNOWN; detail="couldn't reach openai — network, not your key" ;;
@@ -615,7 +666,7 @@ probe() {
       # 2026 carry an AQ. prefix instead. Both authenticate the same endpoint, so
       # probe both rather than calling the newer one unknown (Oscar, 6 Sep 2026:
       # the key was real, the shape was the only thing that looked wrong).
-      hc=$(http_code -H "x-goog-api-key: $v" https://generativelanguage.googleapis.com/v1beta/models)
+      hc=$(http_code -H "x-goog-api-key: $v" https://generativelanguage.googleapis.com/v1beta/models) || exit $?
       case "$hc" in
         200)    verdict=ALIVE;   detail="google ai studio" ;;
         000|"") verdict=UNKNOWN; detail="couldn't reach google — network, not your key" ;;
@@ -623,7 +674,7 @@ probe() {
         *)      verdict=DEAD;    detail="google says invalid (HTTP $hc)" ;;
       esac ;;
     ghp_*|github_pat_*|gho_*)
-      hc=$(http_code -H "Authorization: Bearer $v" https://api.github.com/user)
+      hc=$(http_code -H "Authorization: Bearer $v" https://api.github.com/user) || exit $?
       case "$hc" in
         200)    verdict=ALIVE;   detail=github ;;
         000|"") verdict=UNKNOWN; detail="couldn't reach github — network, not your key" ;;
@@ -647,7 +698,7 @@ probe() {
         verdict=UNKNOWN
         detail="no SUPABASE_URL on this machine — can't ask which project it belongs to"
       else
-        hc=$(http_code -H "apikey: $v" -H "Authorization: Bearer $v" "${surl%/}/rest/v1/")
+        hc=$(http_code -H "apikey: $v" -H "Authorization: Bearer $v" "${surl%/}/rest/v1/") || exit $?
         case "$hc" in
           200|404) verdict=ALIVE;   detail="supabase (${surl#https://})" ;;
           000|"")  verdict=UNKNOWN; detail="couldn't reach supabase — network, not your key" ;;
@@ -997,13 +1048,14 @@ land_it() {
   if (( stale > 0 )); then
     print ""
     print -n "  overwrite the $stale stale copy(ies) with what you just pasted? [Y/n/p=pick] ▸ "
-    read -r ans || ans=""
+    # No answer at all (EOF) is not a yes: stop before touching any file.
+    read -r ans || { print ""; print -u2 "  no answer, files left alone."; exit 1; }
     case "${ans:l}" in
       n*) c 244 "  left alone. they will keep failing until something rewrites them." ;;
       p*) for i in {1..${#hp}}; do
             [[ "${hs[$i]}" == same ]] && continue
             print -n "     ${hp[$i]/#$HOME/~} (${hv[$i]}) ? [y/N] ▸ "
-            read -r ans || ans=""
+            read -r ans || { print ""; print -u2 "  no answer, files left alone."; exit 1; }
             [[ "${ans:l}" == y* ]] && cmd_site "$ref" "${hp[$i]}" "${hv[$i]}" >/dev/null
           done
           cmd_fan "$ref" || true ;;
@@ -1071,19 +1123,27 @@ paste_and_land() {
   # retrieval steps and the browser prompt are all noise standing between you
   # and done. The value is never printed — you get the provider it looks like,
   # its length and its fingerprint, and nothing else.
+  #
+  # Consent comes first, twice. The clipboard is not read until you say "y",
+  # because it can hold anything (a password, someone else's key). Then you see
+  # the provider it looks like and a masked fingerprint, and a second "y" stores
+  # it. Enter means no at both prompts. EOF or Ctrl+C ends the run, nothing written.
   elif [[ -z "${COO_TEST:-}" && -t 0 ]] && command -v pbpaste >/dev/null 2>&1; then
-    clip=$(pbpaste 2>/dev/null | tr -d '[:space:]')   # no API key contains whitespace
-    if (( ${#clip} >= 20 )); then
-      clipsvc=$(detect_provider "$clip")
-      print ""
-      if [[ -n "$clipsvc" ]]; then
-        c green "  📋 your clipboard holds a $clipsvc key — $(fp "$clip"), ${#clip} chars"
+    print ""
+    if ask_yes "  📋 read your clipboard for $ref?"; then
+      clip=$(pbpaste 2>/dev/null | tr -d '[:space:]')   # no API key contains whitespace
+      if (( ${#clip} >= 20 )); then
+        clipsvc=$(detect_provider "$clip")
+        c 244 "  📋 clipboard: ${clipsvc:-unrecognised shape}, $(mask_key "$clip" "$clipsvc"), ${#clip} chars"
+        if ask_yes "  store it as $ref?"; then
+          v="$clip"
+        else
+          c 244 "  clipboard not used."
+        fi
       else
-        c 244   "  📋 your clipboard holds something unrecognised — $(fp "$clip"), ${#clip} chars"
+        c 244 "  the clipboard doesn't hold a key (${#clip} chars)."
       fi
-      print -n "  use it for $ref? [Y/n] ▸ "
-      read -r cans || cans=""
-      [[ "${cans:l}" == n* ]] || v="$clip"
+      clip=""; unset clip
     fi
   fi
 
@@ -1137,9 +1197,7 @@ paste_and_land() {
         c red "  ✗ refusing — nothing stored. copy the right key and run it again."
         return 1
       fi
-      print -n "     store it as $ref anyway? [y/N] ▸ "
-      read -r ans || ans=""
-      [[ "$ans" == [yY]* ]] || { c 244 "  nothing stored. grab the right row and run coo again."; return 1 }
+      ask_yes "     store it as $ref anyway?" || { c 244 "  nothing stored. grab the right row and run coo again."; v=""; return 1 }
     else
       # you named this yourself, so you meant it — just say what we can see.
       c 244 "  (looks like a $seen_name key — storing it as $ref, your name wins.)"
@@ -1172,17 +1230,28 @@ paste_and_land() {
     c green "  ✓ jwt role: service_role — the right one."
   fi
 
-  local res verdict detail; res=$(probe "$v" "$ref"); verdict="${res%%|*}"; detail="${res#*|}"
+  # The probe runs in a subshell. If it was killed (Ctrl+C during curl), its
+  # status is 128+n and nothing may be stored, even when this function was called
+  # from an `|| true` context where errexit does not fire.
+  local res="" verdict detail prc=0
+  res=$(probe "$v" "$ref") || prc=$?
+  if (( prc >= 128 )); then v=""; cleanup; print -u2 "  interrupted, nothing stored."; exit "$prc"; fi
+  if (( prc )) || [[ -z "$res" ]]; then
+    v=""; c red "  ✗ the check did not finish. nothing stored."; return 1
+  fi
+  verdict="${res%%|*}"; detail="${res#*|}"
   case "$verdict" in
-    DEAD|EXPIRED) c red "  ✗ the provider rejects that key ($detail). not stored — grab a fresh one and retry."; return 1 ;;
+    DEAD|EXPIRED) v=""; c red "  ✗ the provider rejects that key ($detail). not stored, grab a fresh one and retry."; return 1 ;;
     ALIVE|LOW)    c green "  ✓ verified live with the provider: $detail" ;;
-    *)            c 244 "  no live probe for this shape yet — storing it as-is ($(fp "$v"), ${#v} chars)" ;;
+    UNKNOWN)      c 244 "  no live check for this one ($detail). storing it as-is ($(mask_key "$v" "$(detect_provider "$v")"), ${#v} chars)" ;;
+    *)            v=""; c red "  ✗ unexpected check result. nothing stored."; return 1 ;;
   esac
 
-  kc_set "$ref" "$v" || return 1
+  kc_set "$ref" "$v" || { v=""; return 1 }
   idx_add "$ref"
   c green "  ✓ stashed $ref"
   land_it "$ref" "$v"
+  v=""
   return 0
 }
 
@@ -1370,7 +1439,9 @@ cmd_setup() {
   fi
 
   print "  scanning your machine…"
-  local tmp; tmp=$(mktemp)
+  # Found values stay in memory. They used to go to a temp file, which a Ctrl+C
+  # or an early failure left on disk as plaintext keys.
+  local -A found; found=()
   local f line name value svc
   for f in $HOME/.zshrc $HOME/CODE/*/.env $HOME/CODE/*/.env.local $HOME/.claude/credentials/*.env; do
     [[ -f "$f" ]] || continue
@@ -1380,7 +1451,7 @@ cmd_setup() {
       value="${line#*=}"; value="${value//\"/}"; value="${value//\'/}"
       [[ ${#value} -ge 20 && "$name" == *(KEY|TOKEN|SECRET)* ]] || continue
       svc=$(service_of "$value")
-      print "$svc\t$value" >> "$tmp"
+      [[ -n "${found[$svc]:-}" ]] || found[$svc]="$value"   # first one wins, as before
     done < "$f"
   done
 
@@ -1392,7 +1463,7 @@ cmd_setup() {
   # local echoes its current value, and `stored` holds a live API key.
   local s val res verdict detail fresh stored vres vv
   for s in $services; do
-    val=$(awk -F'\t' -v s="$s" '$1==s{print $2; exit}' "$tmp")
+    val="${found[$s]:-}"
     stored=$(kc_get "$s/API_KEY" 2>/dev/null || true)
     [[ -z "$val" && -n "$stored" ]] && val="$stored"
 
@@ -1420,7 +1491,7 @@ cmd_setup() {
     kc_set "$s/API_KEY" "$fresh"; idx_add "$s/API_KEY"
     c green "     ✓ verified (${vres#*|}) and gathered into the nest."
   done
-  rm -f "$tmp"
+  found=()
 
   # ---- pending sites: any key with a declared home gets FINISHED right here.
   # this is the piece that makes `coo` the whole guide: if a site was declared
