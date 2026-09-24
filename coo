@@ -680,10 +680,21 @@ print(f\"EXPIRED|jwt role={role}, expired\" if exp and exp<time.time() else f\"A
 # a key-divergence tool must never give. Same rule as the Supabase probe: an
 # unknown that names its own gap is actionable, a bare negative is not.
 # Override with COO_ROOTS, colon-separated.
+# macOS volumes are case-insensitive by default, so ~/CODE and ~/code are one
+# directory reached twice. Without this every key was counted twice ("14 keys"
+# for 7) and each copy listed under both spellings (stranger test, 2026-09-24).
+# `-ef` compares device and inode, so it catches any alias, not just case.
 key_roots() {
-  if [[ -n "${COO_ROOTS:-}" ]]; then print -l -- ${(s.:.)COO_ROOTS}; return 0; fi
-  print -l -- $HOME/CODE $HOME/code $HOME/dev $HOME/src $HOME/work \
-              $HOME/Projects $HOME/projects $HOME/repos $HOME/git
+  local -a cand kept; local r k dup
+  if [[ -n "${COO_ROOTS:-}" ]]; then cand=( ${(s.:.)COO_ROOTS} )
+  else cand=( $HOME/CODE $HOME/code $HOME/dev $HOME/src $HOME/work
+              $HOME/Projects $HOME/projects $HOME/repos $HOME/git ); fi
+  for r in $cand; do
+    dup=0
+    for k in $kept; do [[ "$r" -ef "$k" ]] && { dup=1; break } done
+    (( dup )) || kept+=( "$r" )
+  done
+  print -l -- $kept
 }
 
 key_files() {
