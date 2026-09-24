@@ -125,6 +125,10 @@ one of them is now known to be false.
 
 Four things this pass turned up that are bugs, not gaps.
 
+**Status on 2026-09-24:** #1 and #2 were fixed in `coo` on 2026-08-05. The
+`REGISTRY` header comment in `coo` records both fixes. #3 and #4 are still open. The
+counts and the table above are the 2026-08-01 snapshot, taken before those fixes.
+
 **1. Cloudflare has documented prefixes and pigeon has none.**
 https://developers.cloudflare.com/fundamentals/api/get-started/token-formats/ documents
 three: `cfk_` (global key), `cfut_` (user token), `cfat_` (account token). The

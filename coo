@@ -546,7 +546,11 @@ menu_numbered() {
 # "couldn't reach the provider" is NOT "the provider rejected your key". Telling
 # someone their live key is DEAD is how a good key gets revoked by mistake, so a
 # probe that cannot connect must say UNKNOWN and say why.
-http_code() { curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" 2>/dev/null || print 000; }
+# curl prints "000" itself when it cannot connect AND exits non-zero, so the old
+# `|| print 000` produced "000000", which matched no `000|""` arm and fell through
+# to DEAD. Found by the 2026-09-24 stranger test: an unreachable Supabase host was
+# reported DEAD, the exact false verdict the comment above forbids.
+http_code() { local c; c=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" 2>/dev/null) || true; print -r -- "${c:-000}"; }
 
 # The project URL a `sb_secret_` key belongs to, read off this machine. Returns
 # empty when it isn't here, which the caller must report as UNKNOWN rather than

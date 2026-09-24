@@ -10,12 +10,16 @@ $ coo test
 
   anthropic/API_KEY      ALIVE     anthropic
   openrouter/API_KEY     LOW       only $2.14 left
-  supabase/SERVICE_KEY   DEAD      supabase says invalid (HTTP 401)
+  supabase/SERVICE_KEY   DEAD      supabase rejected it (HTTP 401)
   sendgrid/API_KEY       UNKNOWN   no probe for this shape
 
   2 alive · 1 dead · 1 unverified
   a dead key that still sits in a config is an agent that fails silently.
 ```
+
+![coo test against seven fake keys: five DEAD, two UNKNOWN, exit 1](docs/coo-test.gif)
+
+*Recorded against fake keys in a throwaway home directory. Every provider refuses them, and pigeon says so.*
 
 ---
 
@@ -46,6 +50,8 @@ coo rotate <ref>             replace a key everywhere, then revoke the old one
 coo push <ref> [--redeploy]  re-send a stored key to its files and Vercel env
 coo pending                  what still needs a human paste
 coo delete <ref>             remove a key
+coo fix                      probe the keys on this machine and repair what's broken
+coo install                  put coo on your PATH
 ```
 
 Two words used throughout: a **`<ref>`** is one key, written `service/NAME` — `openrouter/API_KEY`, `stripe/WEBHOOK_SECRET`. The **nest** is where pigeon keeps them: on macOS, your Keychain.
@@ -79,7 +85,7 @@ Copied it out of a terminal and dragged your shell prompt along? It trims the pr
 
 ### Then it lands
 
-A vault stores your key. pigeon **puts it where it belongs**, in the same breath as the paste. The moment a value is verified it looks for every copy already on your machine — matching the value's *shape*, not the variable name, because the fourth copy is always the one somebody called `OR_KEY` at 2am:
+A vault stores your key. pigeon **puts it where it belongs**, in the same breath as the paste. The moment a value is verified it looks for every copy already on your machine. It matches the value's *shape*, not the variable name, because the fourth copy is always the one somebody called `OR_KEY` at 2am. It looks in your shell profiles and in the `.env` files one level under `~/CODE`, `~/code`, `~/dev`, `~/src`, `~/work`, `~/Projects`, `~/projects`, `~/repos` and `~/git` (set `COO_ROOTS=~/a:~/b` to choose your own):
 
 ```
 🐦 this key already lives in 3 place(s) on this machine:
@@ -172,17 +178,17 @@ Requires `zsh`, `curl`, `python3`, and the macOS Keychain. `pbpaste` for clipboa
 
 Two different claims, and the difference is the honest part.
 
-**Recognised — 60 providers.** One line each in the `REGISTRY` table at the top of `coo`: display name, key prefixes, env-var convention, default ref, console URL. That table powers the picker, the wrong-provider catch, and the retrieval guides. Adding a provider is **one line and no code**.
+**Recognised: 60 providers.** One line each in the `REGISTRY` table at the top of `coo`: display name, key prefixes, env-var convention, default ref, console URL. That table powers the picker, the wrong-provider catch, and the retrieval guides. Adding a provider is **one line and no code**.
 
-**Probed live — 6 key shapes.** OpenRouter (returns remaining credit), Anthropic, OpenAI, GitHub, Supabase `sb_secret_`, and any JWT (decoded locally, shows the role). Everything else is stored and reported `UNKNOWN` — pigeon says it can't check rather than implying it did.
+**Probed live: 8.** OpenRouter (returns remaining credit), Anthropic, OpenAI, Google AI Studio (`AIza` and `AQ.`), GitHub, Supabase `sb_secret_`, and any JWT (decoded locally, shows the role and whether it has expired). Parallel keys have no shape, so pigeon asks Parallel when the ref says `parallel/…`. Everything else is stored and reported `UNKNOWN`. pigeon says it can't check rather than implying it did.
 
 The Supabase one is worth a sentence, because a `sb_secret_` key **does not carry its own project** — the old JWT had `ref` in its claims, the new format dropped it, so the key alone is unaskable. pigeon looks for a `SUPABASE_URL` next to it in the same `.env` it already read. If there isn't one it says *which fact is missing* — `no SUPABASE_URL on this machine — can't ask which project it belongs to` — rather than the useless `no probe for this shape`. That is the shape every `UNKNOWN` here should eventually take.
 
 **54 of 60 providers have no probe at all**, and today they all say `no probe for this shape`. That is the honest gap, and it is the next slice.
 
-A probe that can't reach the provider reports `UNKNOWN — couldn't reach anthropic, network not your key`, never `DEAD`. Telling someone their live key is dead is how a good key gets revoked by mistake.
+A probe that can't reach the provider reports `UNKNOWN` and says the network failed, not your key. It never reports `DEAD` for that. Telling someone their live key is dead is how a good key gets revoked by mistake.
 
-**Cited — 33 of 70 prefixes.** As of 2026-08-01, every prefix in `REGISTRY` has been checked against the vendor's own documentation, and the result is in [PREFIXES.md](PREFIXES.md), one row per prefix with the source URL:
+**Cited: 33 of 70 prefixes on 2026-08-01.** On that date every prefix in `REGISTRY` was checked against the vendor's own documentation, and the result is in [PREFIXES.md](PREFIXES.md), one row per prefix with the source URL. The table below is that snapshot. Two fixes landed since (below), so `REGISTRY` now carries 72 prefixes, 35 of them cited:
 
 | | prefixes | provider rows |
 |---|---|---|
@@ -190,16 +196,16 @@ A probe that can't reach the provider reports `UNKNOWN — couldn't reach anthro
 | **UNVERIFIED** — no vendor doc found | **37 / 70** | 27 / 60 with ≥1 uncited prefix |
 | rows claiming no prefix at all | — | 18 / 60 |
 
-⚠️ **37 of 70 prefixes remain unverified** — written from memory in v0.1 and never confirmed. They may be correct; they are not proven, and pigeon does not claim they are. A wrong one causes a false "wrong provider" block. Correcting one is a one-line PR, and that's deliberate: key formats churn constantly, so the rules should be community-owned.
+⚠️ **37 prefixes remain unverified.** They were written from memory in v0.1 and never confirmed. They may be correct; they are not proven, and pigeon does not claim they are. A wrong one causes a false "wrong provider" block. Correcting one is a one-line PR, and that's deliberate: key formats churn constantly, so the rules should be community-owned.
 
-The pass also found four defects, all listed in [PREFIXES.md](PREFIXES.md#findings). One is live: **Twilio's `SK` is attached to the wrong field** — it's the API Key SID prefix, not the Auth Token, so pigeon currently rejects a correct Twilio auth token as "wrong provider."
+The pass also found four defects, all listed in [PREFIXES.md](PREFIXES.md#findings). Two are fixed: Twilio's `SK` was the API Key SID prefix, not the Auth Token's, and has been removed, so a correct Twilio auth token is no longer rejected as "wrong provider"; Cloudflare's three documented prefixes (`cfk_`, `cfut_`, `cfat_`) were added. Two are open: npm's `npm_` and Neon's `napi_` are contradicted by their own vendor docs and need a real token to settle.
 
 ## Status
 
-v0.3 — one file, 1,643 lines, ~60 of which are the provider table. Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet, and driven end-to-end against real keys and real production.
+v0.3: one file, about 1,700 lines, ~60 of which are the provider table. Built and dogfooded on a real 46-repo, multi-agent, VPS-and-Vercel fleet, and driven end-to-end against real keys and real production.
 
 Done: the picker, clipboard paste, live verification, post-paste landing, account-vs-project safety, Vercel push + redeploy, the agent handshake, JSON output.
 
-Not done: no probe for most providers, 37 of 70 prefixes still uncited (see [PREFIXES.md](PREFIXES.md)), four known prefix defects unfixed, macOS only, and it has never been run by anyone who isn't its author. See ROADMAP.md.
+Not done: no probe for most providers, 37 prefixes still uncited (see [PREFIXES.md](PREFIXES.md)), two known prefix defects open (npm, Neon), macOS only, and it has never been run by anyone who isn't its author. See ROADMAP.md.
 
 MIT.
