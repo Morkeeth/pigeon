@@ -47,6 +47,7 @@ coo test                     ask every provider: are my keys still alive?
 coo keys                     list what you've got (names only, never values)
 coo scan                     find keys scattered across this machine
 coo rotate <ref>             replace a key everywhere, then revoke the old one
+coo push <ref> --dry-run    preview declared file changes; no writes or deployment
 coo push <ref> [--redeploy]  re-send a stored key to its files and Vercel env
 coo pending                  what still needs a human paste
 coo delete <ref>             remove a key
@@ -210,3 +211,24 @@ Done: the picker, clipboard paste, live verification, post-paste landing, accoun
 Not done: no probe for most providers, 37 prefixes still uncited (see [PREFIXES.md](PREFIXES.md)), two known prefix defects open (npm, Neon), macOS only, and it has never been run by anyone who isn't its author. See ROADMAP.md.
 
 MIT.
+
+
+### Review a repair before applying it
+
+Run `coo push <ref> --dry-run` to inspect the destinations already declared for
+that reference. It shows each variable that would change or be added, entries
+already matching, and unreadable/missing files. Values stay hidden; changed
+values use the same short fingerprints as normal push. Undeclared files and
+other projects are not discovered or added by this command.
+
+Preview reads the stored key and declared files. It creates no local state,
+files or backups, never invokes Vercel, and never deploys—even if `--redeploy`
+is also supplied. Remote targets are listed as planned; their current values
+are not checked. Missing files remain missing in both preview and normal push.
+Run the same command without `--dry-run` to apply the repair. Preview is a
+snapshot, not a lock: write mode reads the current files again.
+
+`python3 tests/push-preview.py` exercises the actual CLI with fake keys and
+command shims, without accessing the real Keychain or clipboard. A mutation
+trap is deliberately fired first, then asserts preview is read-only and the
+normal fake-file write matches its plan and preserves the pristine backup.
