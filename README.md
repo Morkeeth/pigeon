@@ -1,6 +1,14 @@
 # 🐦 pigeon
 
-**Your API keys are copied across a dozen `.env` files, and you have no idea which copies still work.** pigeon is one command — `coo` — that finds every copy on your machine, asks each provider which keys are actually dead or out of credit, and replaces them everywhere at once.
+**pigeon is one command, `coo`, that finds every copy of your API keys on your Mac, asks each provider whether the key still works, and replaces dead ones everywhere at once.**
+
+The problem: keys get copied across a dozen `.env` files, one copy gets revoked, and an agent goes dark for days while your dashboard says healthy.
+
+For people running a handful of agents across a laptop, a VPS and Vercel, where the team is agents rather than seats.
+
+It scans the machine, reports each key as alive, low on credit, dead or unknown (with the provider's answer), keeps keys in the macOS Keychain, and pushes replacements to the places that use them.
+
+Free, local, macOS only for now. Try it: `git clone https://github.com/Morkeeth/pigeon && cd pigeon && ./coo install`
 
 **macOS only right now** — keys are stored in the macOS Keychain. [Linux support is the first thing we want help with →](https://github.com/Morkeeth/pigeon/issues)
 
