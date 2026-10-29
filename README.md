@@ -130,7 +130,7 @@ Supabase, Vercel, Clerk, Neon, Stripe test/live and anything not on that list ar
 🐦 other supabase keys on this machine (NOT touched):
       1  ~/CODE/litmus/.env   SUPABASE_SECRET_KEY   stale (248b772b)
   ↑ supabase keys are PER-PROJECT. A different value there is a different
-    project, not a stale copy ;  overwriting it would break that project.
+    project, not a stale copy — overwriting it would break that project.
 ```
 
 The list is conservative on purpose: absent means never bulk-write. This rule exists because the first version didn't have it and wrote one project's Supabase key over another's.
@@ -154,7 +154,7 @@ An agent can do everything except the paste. That's the point ;  the key never p
 
 ```bash
 coo site <ref> <file> <VAR>      # declare where a key must live. no secret involved.
-coo pending --json               # ["stripe/SECRET_KEY"] ;  exit 1 while any wait
+coo pending --json               # ["stripe/SECRET_KEY"] — exit 1 while any wait
 coo test --json                  # {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
 coo keys --json                  # the refs, as a JSON array
 printf %s "$KEY" | coo add <ref> --stdin
