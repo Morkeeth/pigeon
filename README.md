@@ -1,16 +1,28 @@
 # 🐦 pigeon
 
-**pigeon is one command, `coo`, that finds every copy of your API keys on your Mac, asks each provider whether the key still works, and replaces dead ones everywhere at once.**
+## TLDR
+
+Find configured API-key copies, check provider responses and review proposed repairs.<br>
+For people maintaining agent credentials across a Mac and connected services.<br>
+Status checks can contact providers; replacement and installation commands can change credential stores.
+
+## The problem and approach
 
 The problem: keys get copied across a dozen `.env` files, one copy gets revoked, and an agent goes dark for days while your dashboard says healthy.
-
-For people running a handful of agents across a laptop, a VPS and Vercel, where the team is agents rather than seats.
 
 It scans the machine, reports each key as alive, low on credit, dead or unknown (with the provider's answer), keeps keys in the macOS Keychain, and pushes replacements to the places that use them.
 
 Free, local, macOS only for now. Try it: `git clone https://github.com/Morkeeth/pigeon && cd pigeon && ./coo install`
 
-**macOS only right now** — keys are stored in the macOS Keychain. [Linux support is the first thing we want help with →](https://github.com/Morkeeth/pigeon/issues)
+## Review and pick up the work
+
+[Agent guide](AGENTS.md)
+
+Start with the linked source, setup and evidence. Recorded demos and sample data keep their original scope; use the repository instructions for a fresh run.
+
+**Your API keys are copied across a dozen `.env` files, and you have no idea which copies still work.** pigeon is one command ;  `coo` ;  that finds every copy on your machine, asks each provider which keys are actually dead or out of credit, and replaces them everywhere at once.
+
+**macOS only right now** ;  keys are stored in the macOS Keychain. [Linux support is the first thing we want help with →](https://github.com/Morkeeth/pigeon/issues)
 
 ```
 $ coo test
@@ -37,7 +49,7 @@ You run agents now, not just apps. A handful of them, across your laptop, a VPS,
 
 Every secrets manager on the market solves *storage*. None of them answer the question you actually have:
 
-> which of my keys is dead, drained, or the wrong role — right now?
+> which of my keys is dead, drained, or the wrong role ;  right now?
 
 They also all charge **per human seat**. Your "team" is five agents and zero humans. pigeon is free, local, and priced for fleets, not seats.
 
@@ -63,7 +75,7 @@ coo fix                      probe the keys on this machine and repair what's br
 coo install                  put coo on your PATH
 ```
 
-Two words used throughout: a **`<ref>`** is one key, written `service/NAME` — `openrouter/API_KEY`, `stripe/WEBHOOK_SECRET`. The **nest** is where pigeon keeps them: on macOS, your Keychain.
+Two words used throughout: a **`<ref>`** is one key, written `service/NAME` ;  `openrouter/API_KEY`, `stripe/WEBHOOK_SECRET`. The **nest** is where pigeon keeps them: on macOS, your Keychain.
 
 <details>
 <summary>older command names still work</summary>
@@ -73,11 +85,11 @@ Two words used throughout: a **`<ref>`** is one key, written `service/NAME` — 
 
 ### Pick
 
-Bare `coo` opens a picker over 60 providers that filters as you type — `ant` is enough to land on Anthropic. It marks what's already in your nest, floats what you reached for last, and runs as a modal that leaves nothing in your scrollback.
+Bare `coo` opens a picker over 60 providers that filters as you type ;  `ant` is enough to land on Anthropic. It marks what's already in your nest, floats what you reached for last, and runs as a modal that leaves nothing in your scrollback.
 
-No fzf, no config, no dependencies — raw zsh against `/dev/tty`, speaking synchronized output (DEC 2026), the alternate screen and OSC 8 hyperlinks. Terminals that don't implement those ignore them, and it degrades to a plain numbered list where there's no TTY at all.
+No fzf, no config, no dependencies ;  raw zsh against `/dev/tty`, speaking synchronized output (DEC 2026), the alternate screen and OSC 8 hyperlinks. Terminals that don't implement those ignore them, and it degrades to a plain numbered list where there's no TTY at all.
 
-### Paste — or don't
+### Paste ;  or don't
 
 If the key is already on your clipboard, that *is* the paste:
 
@@ -89,9 +101,9 @@ store it as stripe/SECRET_KEY? [y/N] ▸ y
 
 pigeon asks before it reads the clipboard, because the clipboard can hold anything. Then it shows the provider the value looks like and a masked fingerprint (a short prefix and the last 4 characters), and asks again. Only `y` or `yes` counts. Enter means no. Ctrl+C or end of input stops the run before anything is written. The retrieval steps and console link appear when you say no or the clipboard has nothing usable.
 
-**pigeon names a value from its prefix.** Paste an `sk-or-v1-…` into the OpenAI slot and it stops you — *"that looks like an OpenRouter key, not openai"* — before storing anything. Same catch that saves you from Supabase's publishable row when you wanted a secret key, generalised to every provider in the table.
+**pigeon names a value from its prefix.** Paste an `sk-or-v1-…` into the OpenAI slot and it stops you ;  *"that looks like an OpenRouter key, not openai"* ;  before storing anything. Same catch that saves you from Supabase's publishable row when you wanted a secret key, generalised to every provider in the table.
 
-Copied it out of a terminal and dragged your shell prompt along? It trims the prompt and tells you. Anything non-ASCII left over is refused outright — macOS re-encodes such values in the Keychain, which would silently store bytes you never pasted.
+Copied it out of a terminal and dragged your shell prompt along? It trims the prompt and tells you. Anything non-ASCII left over is refused outright ;  macOS re-encodes such values in the Keychain, which would silently store bytes you never pasted.
 
 ### Then it lands
 
@@ -106,9 +118,9 @@ A vault stores your key. pigeon **puts it where it belongs**, in the same breath
 overwrite the 2 stale copy(ies) with what you just pasted? [Y/n/p=pick] ▸
 ```
 
-Every changed file is backed up as `<file>.bak-pigeon` first, and **shell profiles are never bulk-written** — a `.zshrc` is a bigger deal than a `.env`, so it needs `p` and an explicit yes.
+Every changed file is backed up as `<file>.bak-pigeon` first, and **shell profiles are never bulk-written** ;  a `.zshrc` is a bigger deal than a `.env`, so it needs `p` and an explicit yes.
 
-### Account keys vs project keys — the rule that matters
+### Account keys vs project keys ;  the rule that matters
 
 **pigeon only offers to overwrite copies of a key that is one-per-account.** OpenRouter, Anthropic, OpenAI, GitHub and friends: one account, one key, so a differing copy is stale and worth fixing.
 
@@ -118,7 +130,7 @@ Supabase, Vercel, Clerk, Neon, Stripe test/live and anything not on that list ar
 🐦 other supabase keys on this machine (NOT touched):
       1  ~/CODE/litmus/.env   SUPABASE_SECRET_KEY   stale (248b772b)
   ↑ supabase keys are PER-PROJECT. A different value there is a different
-    project, not a stale copy — overwriting it would break that project.
+    project, not a stale copy ;  overwriting it would break that project.
 ```
 
 The list is conservative on purpose: absent means never bulk-write. This rule exists because the first version didn't have it and wrote one project's Supabase key over another's.
@@ -134,32 +146,32 @@ coo push supabase/SERVICE_KEY --redeploy
 
 An env var doesn't exist for the app until the next build, so `--redeploy` runs `vercel --prod` after a confirmed write. Deploying is never automatic: the flag for scripts, an explicit `y` at a terminal, otherwise a line telling you it isn't live.
 
-Vercel marks Production variables *sensitive*, meaning write-only — `env pull` returns `""` for them. pigeon confirms the variable is **present** and says plainly that it could not read the value back, rather than claiming a check it didn't do.
+Vercel marks Production variables *sensitive*, meaning write-only ;  `env pull` returns `""` for them. pigeon confirms the variable is **present** and says plainly that it could not read the value back, rather than claiming a check it didn't do.
 
 ## For agents
 
-An agent can do everything except the paste. That's the point — the key never passes through it.
+An agent can do everything except the paste. That's the point ;  the key never passes through it.
 
 ```bash
 coo site <ref> <file> <VAR>      # declare where a key must live. no secret involved.
-coo pending --json               # ["stripe/SECRET_KEY"] — exit 1 while any wait
+coo pending --json               # ["stripe/SECRET_KEY"] ;  exit 1 while any wait
 coo test --json                  # {alive, dead, unverified, keys:[{ref,verdict,detail,fingerprint}]}
 coo keys --json                  # the refs, as a JSON array
 printf %s "$KEY" | coo add <ref> --stdin
 coo add <ref> --clipboard        # take what the human copied, verify, land it. no prompts.
 ```
 
-The handshake: the agent declares homes and reports `pending`; the human runs `coo` and presses Enter. With `--clipboard` even that disappears — the agent triggers it and the value goes clipboard → keychain → files without passing through the caller.
+The handshake: the agent declares homes and reports `pending`; the human runs `coo` and presses Enter. With `--clipboard` even that disappears ;  the agent triggers it and the value goes clipboard → keychain → files without passing through the caller.
 
 `--clipboard` **refuses rather than guesses**, because nobody is watching to answer a question: a short clipboard, a different provider than the ref says, or a missing `pbpaste` all stop with nothing stored.
 
-`coo test` exits `0` when nothing is dead and `1` when something is — `coo test || alert` is the whole monitoring integration. Values never appear in any output, JSON included. You get fingerprints.
+`coo test` exits `0` when nothing is dead and `1` when something is ;  `coo test || alert` is the whole monitoring integration. Values never appear in any output, JSON included. You get fingerprints.
 
 ## What it is not
 
 - **Not a vault.** Storage is solved (1Password, SOPS, age). pigeon sits on top and keeps what's stored *alive*. Point it at your existing store.
 - **Not a server.** No account, no cloud, no telemetry. It runs against your machine and the providers' public APIs.
-- **Not a security product.** It's key *ops* for people who run agents. The real control is a spend cap per key — set yours to €10 and a leak is a €10 problem.
+- **Not a security product.** It's key *ops* for people who run agents. The real control is a spend cap per key ;  set yours to €10 and a leak is a €10 problem.
 
 ## Install
 
@@ -173,13 +185,13 @@ coo --version     # 👈 if this says "command not found", see below
 <details>
 <summary><code>coo: command not found</code></summary>
 
-`~/.local/bin` is not on the default macOS `PATH`. Either put it there —
+`~/.local/bin` is not on the default macOS `PATH`. Either put it there ; 
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
 ```
 
-— or skip the symlink entirely and run `./coo` from the clone. Both work; nothing about pigeon needs to be installed.
+;  or skip the symlink entirely and run `./coo` from the clone. Both work; nothing about pigeon needs to be installed.
 </details>
 
 Requires `zsh`, `curl`, `python3`, and the macOS Keychain. `pbpaste` for clipboard mode, `vercel` (Node 18+) only if you declare a Vercel site. A portable [age](https://github.com/FiloSottile/age) backend for Linux and shared nests is the next slice.
@@ -192,7 +204,7 @@ Two different claims, and the difference is the honest part.
 
 **Probed live: 8.** OpenRouter (returns remaining credit), Anthropic, OpenAI, Google AI Studio (`AIza` and `AQ.`), GitHub, Supabase `sb_secret_`, and any JWT (decoded locally, shows the role and whether it has expired). Parallel keys have no shape, so pigeon asks Parallel when the ref says `parallel/…`. Everything else is stored and reported `UNKNOWN`. pigeon says it can't check rather than implying it did.
 
-The Supabase one is worth a sentence, because a `sb_secret_` key **does not carry its own project** — the old JWT had `ref` in its claims, the new format dropped it, so the key alone is unaskable. pigeon looks for a `SUPABASE_URL` next to it in the same `.env` it already read. If there isn't one it says *which fact is missing* — `no SUPABASE_URL on this machine — can't ask which project it belongs to` — rather than the useless `no probe for this shape`. That is the shape every `UNKNOWN` here should eventually take.
+The Supabase one is worth a sentence, because a `sb_secret_` key **does not carry its own project** ;  the old JWT had `ref` in its claims, the new format dropped it, so the key alone is unaskable. pigeon looks for a `SUPABASE_URL` next to it in the same `.env` it already read. If there isn't one it says *which fact is missing* ;  `no SUPABASE_URL on this machine ;  can't ask which project it belongs to` ;  rather than the useless `no probe for this shape`. That is the shape every `UNKNOWN` here should eventually take.
 
 **54 of the 60 recognised providers have no probe at all**, and today they all say `no probe for this shape`. (Parallel is probed by ref and is not one of the 60 rows in the table.) That is the honest gap, and it is the next slice.
 
@@ -202,9 +214,9 @@ A probe that can't reach the provider reports `UNKNOWN` and says the network fai
 
 | | prefixes | provider rows |
 |---|---|---|
-| **VERIFIED** — vendor doc URL on file | **33 / 70** | 15 / 60 fully cited |
-| **UNVERIFIED** — no vendor doc found | **37 / 70** | 27 / 60 with ≥1 uncited prefix |
-| rows claiming no prefix at all | — | 18 / 60 |
+| **VERIFIED** ;  vendor doc URL on file | **33 / 70** | 15 / 60 fully cited |
+| **UNVERIFIED** ;  no vendor doc found | **37 / 70** | 27 / 60 with ≥1 uncited prefix |
+| rows claiming no prefix at all | ;  | 18 / 60 |
 
 ⚠️ **37 prefixes remain unverified.** They were written from memory in v0.1 and never confirmed. They may be correct; they are not proven, and pigeon does not claim they are. A wrong one causes a false "wrong provider" block. Correcting one is a one-line PR, and that's deliberate: key formats churn constantly, so the rules should be community-owned.
 
@@ -230,7 +242,7 @@ values use the same short fingerprints as normal push. Undeclared files and
 other projects are not discovered or added by this command.
 
 Preview reads the stored key and declared files. It creates no local state,
-files or backups, never invokes Vercel, and never deploys—even if `--redeploy`
+files or backups, never invokes Vercel, and never deploys; even if `--redeploy`
 is also supplied. Remote targets are listed as planned; their current values
 are not checked. Missing files remain missing in both preview and normal push.
 Run the same command without `--dry-run` to apply the repair. Preview is a
@@ -240,3 +252,7 @@ snapshot, not a lock: write mode reads the current files again.
 command shims, without accessing the real Keychain or clipboard. A mutation
 trap is deliberately fired first, then asserts preview is read-only and the
 normal fake-file write matches its plan and preserves the pristine backup.
+
+## License and data boundaries
+
+Code terms: [LICENSE](LICENSE). Data, provider responses, media, fonts and other third-party assets may have separate terms. Repository access alone does not grant rights to those materials. 
